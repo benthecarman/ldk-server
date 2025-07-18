@@ -27,6 +27,8 @@ use crate::io::persist::{
 use crate::util::config::load_config;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
 use hex::DisplayHex;
+use ldk_node::bitcoin::base64::prelude::BASE64_STANDARD;
+use ldk_node::bitcoin::base64::Engine;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 #[cfg(feature = "experimental-lsps2-support")]
@@ -36,8 +38,11 @@ use ldk_server_protos::events::{event_envelope, EventEnvelope};
 use ldk_server_protos::types::Payment;
 use prost::Message;
 use rand::Rng;
+use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::select;
@@ -79,14 +84,61 @@ fn main() {
 	let mut builder = Builder::from_config(ldk_node_config);
 	builder.set_log_facade_logger();
 
-	let bitcoind_rpc_addr = config_file.bitcoind_rpc_addr;
+	let mut set_chain_source = false;
 
-	builder.set_chain_source_bitcoind_rpc(
-		bitcoind_rpc_addr.ip().to_string(),
-		bitcoind_rpc_addr.port(),
-		config_file.bitcoind_rpc_user,
-		config_file.bitcoind_rpc_password,
-	);
+	if let Some(bitcoind) = config_file.bitcoind_config.as_ref() {
+		let rpc_addr = match SocketAddr::from_str(&bitcoind.rpc_address) {
+			Ok(addr) => addr,
+			Err(e) => {
+				eprintln!("Invalid bitcoind RPC address: {}", e);
+				std::process::exit(-1);
+			},
+		};
+		builder.set_chain_source_bitcoind_rpc(
+			rpc_addr.ip().to_string(),
+			rpc_addr.port(),
+			bitcoind.rpc_user.clone(),
+			bitcoind.rpc_password.clone(),
+		);
+		set_chain_source = true;
+	}
+
+	if let Some(esplora) = config_file.esplora_config.as_ref() {
+		if set_chain_source {
+			eprintln!("Cannot set both bitcoind and esplora as chain sources.");
+			std::process::exit(-1);
+		}
+
+		match (&esplora.username, &esplora.password) {
+			(Some(username), Some(password)) => {
+				let mut headers = HashMap::with_capacity(1);
+				headers.insert(
+					"Authorization".to_string(),
+					format!(
+						"Basic {}",
+						BASE64_STANDARD.encode(format!("{}:{}", username, password))
+					),
+				);
+				builder.set_chain_source_esplora_with_headers(esplora.url.clone(), headers, None);
+			},
+			(None, None) => {
+				builder.set_chain_source_esplora(esplora.url.clone(), None);
+			},
+			_ => {
+				eprintln!("Both username and password must be provided for esplora.");
+				std::process::exit(-1);
+			},
+		}
+
+		set_chain_source = true;
+	}
+
+	if !set_chain_source {
+		eprintln!(
+			"No chain source configured. Please set either bitcoind or esplora in the config file."
+		);
+		std::process::exit(-1);
+	}
 
 	// LSPS2 support is highly experimental and for testing purposes only.
 	#[cfg(feature = "experimental-lsps2-support")]

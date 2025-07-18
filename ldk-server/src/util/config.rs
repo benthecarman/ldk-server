@@ -14,9 +14,8 @@ pub struct Config {
 	pub network: Network,
 	pub rest_service_addr: SocketAddr,
 	pub storage_dir_path: String,
-	pub bitcoind_rpc_addr: SocketAddr,
-	pub bitcoind_rpc_user: String,
-	pub bitcoind_rpc_password: String,
+	pub bitcoind_config: Option<BitcoindConfig>,
+	pub esplora_config: Option<EsploraConfig>,
 	pub rabbitmq_connection_string: String,
 	pub rabbitmq_exchange_name: String,
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
@@ -38,13 +37,6 @@ impl TryFrom<TomlConfig> for Config {
 				io::Error::new(
 					io::ErrorKind::InvalidInput,
 					format!("Invalid rest service address configured: {}", e),
-				)
-			})?;
-		let bitcoind_rpc_addr =
-			SocketAddr::from_str(&toml_config.bitcoind.rpc_address).map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::InvalidInput,
-					format!("Invalid bitcoind RPC address configured: {}", e),
 				)
 			})?;
 
@@ -79,9 +71,8 @@ impl TryFrom<TomlConfig> for Config {
 			network: toml_config.node.network,
 			rest_service_addr,
 			storage_dir_path: toml_config.storage.disk.dir_path,
-			bitcoind_rpc_addr,
-			bitcoind_rpc_user: toml_config.bitcoind.rpc_user,
-			bitcoind_rpc_password: toml_config.bitcoind.rpc_password,
+			bitcoind_config: toml_config.bitcoind,
+			esplora_config: toml_config.esplora,
 			rabbitmq_connection_string,
 			rabbitmq_exchange_name,
 			lsps2_service_config,
@@ -94,7 +85,8 @@ impl TryFrom<TomlConfig> for Config {
 pub struct TomlConfig {
 	node: NodeConfig,
 	storage: StorageConfig,
-	bitcoind: BitcoindConfig,
+	bitcoind: Option<BitcoindConfig>,
+	esplora: Option<EsploraConfig>,
 	rabbitmq: Option<RabbitmqConfig>,
 	liquidity: Option<LiquidityConfig>,
 }
@@ -116,11 +108,18 @@ struct DiskConfig {
 	dir_path: String,
 }
 
-#[derive(Deserialize, Serialize)]
-struct BitcoindConfig {
-	rpc_address: String,
-	rpc_user: String,
-	rpc_password: String,
+#[derive(Deserialize, Serialize, Debug)]
+pub struct BitcoindConfig {
+	pub rpc_address: String,
+	pub rpc_user: String,
+	pub rpc_password: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct EsploraConfig {
+	pub url: String,
+	pub username: Option<String>,
+	pub password: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -241,9 +240,12 @@ mod tests {
 			network: Network::Regtest,
 			rest_service_addr: SocketAddr::from_str("127.0.0.1:3002").unwrap(),
 			storage_dir_path: "/tmp".to_string(),
-			bitcoind_rpc_addr: SocketAddr::from_str("127.0.0.1:8332").unwrap(),
-			bitcoind_rpc_user: "bitcoind-testuser".to_string(),
-			bitcoind_rpc_password: "bitcoind-testpassword".to_string(),
+			bitcoind_config: Some(BitcoindConfig {
+				rpc_address: "127.0.0.1:8332".to_string(),
+				rpc_user: "bitcoind-testuser".to_string(),
+				rpc_password: "bitcoind-testpassword".to_string(),
+			}),
+			esplora_config: None,
 			rabbitmq_connection_string: "rabbitmq_connection_string".to_string(),
 			rabbitmq_exchange_name: "rabbitmq_exchange_name".to_string(),
 			lsps2_service_config: Some(LSPS2ServiceConfig {
@@ -263,9 +265,18 @@ mod tests {
 		assert_eq!(config.network, expected.network);
 		assert_eq!(config.rest_service_addr, expected.rest_service_addr);
 		assert_eq!(config.storage_dir_path, expected.storage_dir_path);
-		assert_eq!(config.bitcoind_rpc_addr, expected.bitcoind_rpc_addr);
-		assert_eq!(config.bitcoind_rpc_user, expected.bitcoind_rpc_user);
-		assert_eq!(config.bitcoind_rpc_password, expected.bitcoind_rpc_password);
+		assert_eq!(
+			config.bitcoind_config.as_ref().unwrap().rpc_address,
+			expected.bitcoind_config.as_ref().unwrap().rpc_address
+		);
+		assert_eq!(
+			config.bitcoind_config.as_ref().unwrap().rpc_user,
+			expected.bitcoind_config.as_ref().unwrap().rpc_user
+		);
+		assert_eq!(
+			config.bitcoind_config.unwrap().rpc_password,
+			expected.bitcoind_config.unwrap().rpc_password
+		);
 		assert_eq!(config.rabbitmq_connection_string, expected.rabbitmq_connection_string);
 		assert_eq!(config.rabbitmq_exchange_name, expected.rabbitmq_exchange_name);
 		#[cfg(feature = "experimental-lsps2-support")]

@@ -147,7 +147,7 @@ pub(crate) fn payment_kind_to_proto(
 				secret: secret.map(|s| Bytes::copy_from_slice(&s.0)),
 			})),
 		},
-		PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits } => {
+		PaymentKind::Bolt11Jit { hash, preimage, secret, lsp_fee_limits, .. } => {
 			ldk_server_protos::types::PaymentKind {
 				kind: Some(Bolt11Jit(ldk_server_protos::types::Bolt11Jit {
 					hash: hash.to_string(),
