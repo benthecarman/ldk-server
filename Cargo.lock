@@ -1502,7 +1502,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.8",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1858,7 +1858,7 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 [[package]]
 name = "ldk-node"
 version = "0.7.0+git"
-source = "git+https://github.com/benthecarman/ldk-node.git?branch=esplora-auth#3526f8d57e0f345f37bae71b2570d979eac6b9d3"
+source = "git+https://github.com/benthecarman/ldk-node.git?branch=esplora-auth#959472b348f090a58175e62090492037af102df4"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",
@@ -1957,7 +1957,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.2",
 ]
 
 [[package]]
@@ -2636,7 +2636,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.8",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
