@@ -31,6 +31,7 @@ use ldk_node::bitcoin::base64::prelude::BASE64_STANDARD;
 use ldk_node::bitcoin::base64::Engine;
 use ldk_node::config::Config;
 use ldk_node::lightning::ln::channelmanager::PaymentId;
+use ldk_node::lightning::routing::gossip::NodeAlias;
 #[cfg(feature = "experimental-lsps2-support")]
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_server_protos::events;
@@ -80,6 +81,10 @@ fn main() {
 	ldk_node_config.storage_dir_path = config_file.storage_dir_path.clone();
 	ldk_node_config.listening_addresses = Some(vec![config_file.listening_addr]);
 	ldk_node_config.network = config_file.network;
+	let mut bytes = [0u8; 32];
+	let alias = "LDK Server";
+	bytes[..alias.as_bytes().len()].copy_from_slice(alias.as_bytes());
+	ldk_node_config.node_alias = Some(NodeAlias(bytes));
 
 	let mut builder = Builder::from_config(ldk_node_config);
 	builder.set_log_facade_logger();
