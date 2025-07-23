@@ -51,6 +51,7 @@ use tokio::select;
 const USAGE_GUIDE: &str = "Usage: ldk-server <config_path>";
 
 fn main() {
+	pretty_env_logger::env_logger::init();
 	let args: Vec<String> = std::env::args().collect();
 
 	if args.len() < 2 {
