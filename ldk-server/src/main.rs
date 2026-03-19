@@ -272,6 +272,7 @@ fn main() {
 		let server_config = match get_or_generate_tls_config(
 			config_file.tls_config,
 			storage_dir.to_str().unwrap(),
+			&config_file.rest_service_addr.ip().to_string(),
 		) {
 			Ok(config) => config,
 			Err(e) => {

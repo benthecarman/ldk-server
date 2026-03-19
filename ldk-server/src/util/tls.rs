@@ -47,13 +47,15 @@ const TAG_SET: u8 = 0x31;
 /// Gets or generates TLS configuration. If custom paths are provided, uses those.
 /// Otherwise, generates a self-signed certificate in the storage directory.
 pub fn get_or_generate_tls_config(
-	tls_config: Option<TlsConfig>, storage_dir: &str,
+	tls_config: Option<TlsConfig>, storage_dir: &str, bind_ip: &str,
 ) -> Result<ServerConfig, String> {
 	if let Some(config) = tls_config {
 		let cert_path = config.cert_path.unwrap_or(format!("{storage_dir}/tls.crt"));
 		let key_path = config.key_path.unwrap_or(format!("{storage_dir}/tls.key"));
 		if !fs::exists(&cert_path).unwrap_or(false) || !fs::exists(&key_path).unwrap_or(false) {
-			generate_self_signed_cert(&cert_path, &key_path, &config.hosts)?;
+			let mut hosts = config.hosts;
+			hosts.push(bind_ip.to_string());
+			generate_self_signed_cert(&cert_path, &key_path, hosts)?;
 		}
 		load_tls_config(&cert_path, &key_path)
 	} else {
@@ -61,7 +63,7 @@ pub fn get_or_generate_tls_config(
 		let cert_path = format!("{storage_dir}/tls.crt");
 		let key_path = format!("{storage_dir}/tls.key");
 		if !fs::exists(&cert_path).unwrap_or(false) || !fs::exists(&key_path).unwrap_or(false) {
-			generate_self_signed_cert(&cert_path, &key_path, &[])?;
+			generate_self_signed_cert(&cert_path, &key_path, vec![bind_ip.to_string()])?;
 		}
 
 		load_tls_config(&cert_path, &key_path)
@@ -110,10 +112,14 @@ fn parse_pem_private_key(pem_data: &str) -> Result<PrivateKeyDer<'static>, Strin
 /// Generates a self-signed TLS certificate and saves it to the storage directory.
 /// Returns the paths to the generated cert and key files.
 fn generate_self_signed_cert(
-	cert_path: &str, key_path: &str, configure_hosts: &[String],
+	cert_path: &str, key_path: &str, configure_hosts: Vec<String>,
 ) -> Result<(), String> {
 	let mut hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-	hosts.extend_from_slice(configure_hosts);
+	for host in configure_hosts {
+		if !hosts.contains(&host) {
+			hosts.push(host);
+		}
+	}
 
 	let rng = SystemRandom::new();
 
@@ -474,7 +480,7 @@ mod tests {
 		let _ = fs::remove_file(&key_path);
 
 		// Generate cert
-		generate_self_signed_cert(cert_path.to_str().unwrap(), key_path.to_str().unwrap(), &[])
+		generate_self_signed_cert(cert_path.to_str().unwrap(), key_path.to_str().unwrap(), vec![])
 			.unwrap();
 
 		// Verify files exist
