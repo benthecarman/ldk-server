@@ -20,7 +20,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_decode_invoice_request(
-	_context: Context, request: DecodeInvoiceRequest,
+	_context: &Context, request: DecodeInvoiceRequest,
 ) -> Result<DecodeInvoiceResponse, LdkServerError> {
 	let invoice = Bolt11Invoice::from_str(request.invoice.as_str())
 		.map_err(|_| ldk_node::NodeError::InvalidInvoice)?;

@@ -13,7 +13,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_export_pathfinding_scores_request(
-	context: Context, _request: ExportPathfindingScoresRequest,
+	context: &Context, _request: ExportPathfindingScoresRequest,
 ) -> Result<ExportPathfindingScoresResponse, LdkServerError> {
 	let scores = context.node.export_pathfinding_scores()?;
 

@@ -24,7 +24,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_decode_offer_request(
-	_context: Context, request: DecodeOfferRequest,
+	_context: &Context, request: DecodeOfferRequest,
 ) -> Result<DecodeOfferResponse, LdkServerError> {
 	let offer =
 		Offer::from_str(request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;

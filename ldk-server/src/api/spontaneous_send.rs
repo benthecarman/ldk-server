@@ -18,7 +18,7 @@ use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use crate::service::Context;
 
 pub(crate) fn handle_spontaneous_send_request(
-	context: Context, request: SpontaneousSendRequest,
+	context: &Context, request: SpontaneousSendRequest,
 ) -> Result<SpontaneousSendResponse, LdkServerError> {
 	let node_id = PublicKey::from_str(&request.node_id).map_err(|_| {
 		LdkServerError::new(InvalidRequestError, "Invalid node_id provided.".to_string())

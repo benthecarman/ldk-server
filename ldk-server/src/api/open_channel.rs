@@ -19,7 +19,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_open_channel(
-	context: Context, request: OpenChannelRequest,
+	context: &Context, request: OpenChannelRequest,
 ) -> Result<OpenChannelResponse, LdkServerError> {
 	let node_id = PublicKey::from_str(&request.node_pubkey)
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;

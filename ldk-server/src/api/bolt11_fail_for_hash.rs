@@ -16,7 +16,7 @@ use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use crate::service::Context;
 
 pub(crate) fn handle_bolt11_fail_for_hash_request(
-	context: Context, request: Bolt11FailForHashRequest,
+	context: &Context, request: Bolt11FailForHashRequest,
 ) -> Result<Bolt11FailForHashResponse, LdkServerError> {
 	let hash_bytes = <[u8; 32]>::from_hex(&request.payment_hash).map_err(|_| {
 		LdkServerError::new(

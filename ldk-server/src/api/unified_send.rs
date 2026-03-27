@@ -17,7 +17,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_unified_send_request(
-	context: Context, request: UnifiedSendRequest,
+	context: &Context, request: UnifiedSendRequest,
 ) -> Result<UnifiedSendResponse, LdkServerError> {
 	let route_parameters = build_route_parameters_config_from_proto(request.route_parameters)?;
 

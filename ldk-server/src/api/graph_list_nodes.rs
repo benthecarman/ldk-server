@@ -13,7 +13,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_graph_list_nodes_request(
-	context: Context, _request: GraphListNodesRequest,
+	context: &Context, _request: GraphListNodesRequest,
 ) -> Result<GraphListNodesResponse, LdkServerError> {
 	let node_ids =
 		context.node.network_graph().list_nodes().into_iter().map(|n| n.to_string()).collect();

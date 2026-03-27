@@ -14,7 +14,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_get_node_info_request(
-	context: Context, _request: GetNodeInfoRequest,
+	context: &Context, _request: GetNodeInfoRequest,
 ) -> Result<GetNodeInfoResponse, LdkServerError> {
 	let node_status = context.node.status();
 

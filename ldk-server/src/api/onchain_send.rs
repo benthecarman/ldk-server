@@ -17,7 +17,7 @@ use crate::api::error::LdkServerErrorCode::InvalidRequestError;
 use crate::service::Context;
 
 pub(crate) fn handle_onchain_send_request(
-	context: Context, request: OnchainSendRequest,
+	context: &Context, request: OnchainSendRequest,
 ) -> Result<OnchainSendResponse, LdkServerError> {
 	let address = Address::from_str(&request.address)
 		.map_err(|_| ldk_node::NodeError::InvalidAddress)?

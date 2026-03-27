@@ -17,7 +17,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_bolt12_send_request(
-	context: Context, request: Bolt12SendRequest,
+	context: &Context, request: Bolt12SendRequest,
 ) -> Result<Bolt12SendResponse, LdkServerError> {
 	let offer =
 		Offer::from_str(request.offer.as_str()).map_err(|_| ldk_node::NodeError::InvalidOffer)?;

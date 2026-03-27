@@ -19,7 +19,7 @@ use crate::api::error::LdkServerErrorCode::{InvalidRequestError, LightningError}
 use crate::service::Context;
 
 pub(crate) fn handle_update_channel_config_request(
-	context: Context, request: UpdateChannelConfigRequest,
+	context: &Context, request: UpdateChannelConfigRequest,
 ) -> Result<UpdateChannelConfigResponse, LdkServerError> {
 	let user_channel_id: u128 = request
 		.user_channel_id

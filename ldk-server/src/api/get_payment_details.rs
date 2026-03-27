@@ -17,7 +17,7 @@ use crate::service::Context;
 use crate::util::proto_adapter::payment_to_proto;
 
 pub(crate) fn handle_get_payment_details_request(
-	context: Context, request: GetPaymentDetailsRequest,
+	context: &Context, request: GetPaymentDetailsRequest,
 ) -> Result<GetPaymentDetailsResponse, LdkServerError> {
 	let payment_id_bytes =
 		<[u8; PaymentId::LENGTH]>::from_hex(&request.payment_id).map_err(|_| {

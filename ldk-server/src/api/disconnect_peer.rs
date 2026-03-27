@@ -16,7 +16,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_disconnect_peer(
-	context: Context, request: DisconnectPeerRequest,
+	context: &Context, request: DisconnectPeerRequest,
 ) -> Result<DisconnectPeerResponse, LdkServerError> {
 	let node_id = PublicKey::from_str(&request.node_pubkey)
 		.map_err(|_| ldk_node::NodeError::InvalidPublicKey)?;

@@ -14,7 +14,7 @@ use crate::api::error::LdkServerError;
 use crate::service::Context;
 
 pub(crate) fn handle_bolt12_receive_request(
-	context: Context, request: Bolt12ReceiveRequest,
+	context: &Context, request: Bolt12ReceiveRequest,
 ) -> Result<Bolt12ReceiveResponse, LdkServerError> {
 	let offer = match request.amount_msat {
 		Some(amount_msat) => context.node.bolt12_payment().receive(

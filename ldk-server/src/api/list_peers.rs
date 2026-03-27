@@ -14,7 +14,7 @@ use crate::service::Context;
 use crate::util::proto_adapter::peer_to_proto;
 
 pub(crate) fn handle_list_peers_request(
-	context: Context, _request: ListPeersRequest,
+	context: &Context, _request: ListPeersRequest,
 ) -> Result<ListPeersResponse, LdkServerError> {
 	let peers = context.node.list_peers().into_iter().map(peer_to_proto).collect();
 
