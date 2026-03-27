@@ -11,10 +11,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::{Bytes, Incoming};
+use http_body_util::{BodyExt, Limited};
+use hyper::body::Incoming;
 use hyper::service::Service;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response};
 use ldk_node::bitcoin::hashes::hmac::{Hmac, HmacEngine};
 use ldk_node::bitcoin::hashes::{sha256, Hash, HashEngine};
 use ldk_node::Node;
@@ -31,6 +31,7 @@ use ldk_server_protos::endpoints::{
 	SPONTANEOUS_SEND_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
 };
 use prost::Message;
+use tokio::sync::broadcast;
 
 use crate::api::bolt11_claim_for_hash::handle_bolt11_claim_for_hash_request;
 use crate::api::bolt11_fail_for_hash::handle_bolt11_fail_for_hash_request;
@@ -49,7 +50,6 @@ use crate::api::decode_invoice::handle_decode_invoice_request;
 use crate::api::decode_offer::handle_decode_offer_request;
 use crate::api::disconnect_peer::handle_disconnect_peer;
 use crate::api::error::LdkServerError;
-use crate::api::error::LdkServerErrorCode::{AuthError, InvalidRequestError};
 use crate::api::export_pathfinding_scores::handle_export_pathfinding_scores_request;
 use crate::api::get_balances::handle_get_balances_request;
 use crate::api::get_node_info::handle_get_node_info_request;
@@ -71,92 +71,81 @@ use crate::api::spontaneous_send::handle_spontaneous_send_request;
 use crate::api::unified_send::handle_unified_send_request;
 use crate::api::update_channel_config::handle_update_channel_config_request;
 use crate::api::verify_signature::handle_verify_signature_request;
+use crate::grpc::{
+	decode_grpc_body, encode_grpc_frame, grpc_error_response, grpc_response,
+	ldk_error_to_grpc_status, parse_grpc_timeout, validate_grpc_request, GrpcBody, GrpcStatus,
+	GRPC_STATUS_DEADLINE_EXCEEDED, GRPC_STATUS_INVALID_ARGUMENT, GRPC_STATUS_UNAUTHENTICATED,
+	GRPC_STATUS_UNIMPLEMENTED,
+};
 use crate::io::persist::paginated_kv_store::PaginatedKVStore;
-use crate::util::proto_adapter::to_error_response;
+
+/// gRPC path prefix for the LightningNode service.
+const GRPC_SERVICE_PREFIX: &str = "/api.LightningNode/";
 
 // Maximum request body size: 10 MB
-// This prevents memory exhaustion from large requests
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
-pub struct NodeService {
-	node: Arc<Node>,
-	paginated_kv_store: Arc<dyn PaginatedKVStore>,
+pub(crate) struct NodeService {
+	context: Arc<Context>,
 	api_key: String,
+	#[allow(dead_code)]
+	event_sender: broadcast::Sender<ldk_server_protos::events::EventEnvelope>,
 }
 
 impl NodeService {
 	pub(crate) fn new(
 		node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore>, api_key: String,
+		event_sender: broadcast::Sender<ldk_server_protos::events::EventEnvelope>,
 	) -> Self {
-		Self { node, paginated_kv_store, api_key }
+		let context = Arc::new(Context { node, paginated_kv_store });
+		Self { context, api_key, event_sender }
 	}
 }
 
 // Maximum allowed time difference between client timestamp and server time (1 minute)
 const AUTH_TIMESTAMP_TOLERANCE_SECS: u64 = 60;
 
-#[derive(Debug, Clone)]
-pub(crate) struct AuthParams {
-	timestamp: u64,
-	hmac_hex: String,
-}
+/// Validates HMAC authentication from request headers.
+/// Uses timestamp-only HMAC (no body) since TLS guarantees integrity.
+fn validate_auth<B>(req: &Request<B>, api_key: &str) -> Result<(), GrpcStatus> {
+	let auth_header =
+		req.headers().get("x-auth").and_then(|v| v.to_str().ok()).ok_or_else(|| {
+			GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Missing x-auth metadata")
+		})?;
 
-/// Extracts authentication parameters from request headers.
-/// Returns (timestamp, hmac_hex) if valid format, or error.
-fn extract_auth_params<B>(req: &Request<B>) -> Result<AuthParams, LdkServerError> {
-	let auth_header = req
-		.headers()
-		.get("X-Auth")
-		.and_then(|v| v.to_str().ok())
-		.ok_or_else(|| LdkServerError::new(AuthError, "Missing X-Auth header"))?;
-
-	// Format: "HMAC <timestamp>:<hmac_hex>"
 	let auth_data = auth_header
 		.strip_prefix("HMAC ")
-		.ok_or_else(|| LdkServerError::new(AuthError, "Invalid X-Auth header format"))?;
+		.ok_or_else(|| GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Invalid x-auth format"))?;
 
-	let (timestamp_str, hmac_hex) = auth_data
+	let (timestamp_str, provided_hmac_hex) = auth_data
 		.split_once(':')
-		.ok_or_else(|| LdkServerError::new(AuthError, "Invalid X-Auth header format"))?;
+		.ok_or_else(|| GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Invalid x-auth format"))?;
 
 	let timestamp = timestamp_str
 		.parse::<u64>()
-		.map_err(|_| LdkServerError::new(AuthError, "Invalid timestamp in X-Auth header"))?;
+		.map_err(|_| GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Invalid timestamp"))?;
 
-	// validate hmac_hex is valid hex
-	if hmac_hex.len() != 64 || !hmac_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-		return Err(LdkServerError::new(AuthError, "Invalid HMAC in X-Auth header"));
-	}
-
-	Ok(AuthParams { timestamp, hmac_hex: hmac_hex.to_string() })
-}
-
-/// Validates the HMAC authentication after the request body has been read.
-fn validate_hmac_auth(
-	timestamp: u64, provided_hmac_hex: &str, body: &[u8], api_key: &str,
-) -> Result<(), LdkServerError> {
-	// Validate timestamp is within acceptable window
 	let now = std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
-		.map_err(|_| LdkServerError::new(AuthError, "System time error"))?
+		.map_err(|_| GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "System time error"))?
 		.as_secs();
 
-	let time_diff = now.abs_diff(timestamp);
-	if time_diff > AUTH_TIMESTAMP_TOLERANCE_SECS {
-		return Err(LdkServerError::new(AuthError, "Request timestamp expired"));
+	if now.abs_diff(timestamp) > AUTH_TIMESTAMP_TOLERANCE_SECS {
+		return Err(GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Request timestamp expired"));
 	}
 
-	// Compute expected HMAC: HMAC-SHA256(api_key, timestamp_bytes || body)
+	// HMAC-SHA256(api_key, timestamp_bytes) — no body since TLS guarantees integrity
 	let mut hmac_engine: HmacEngine<sha256::Hash> = HmacEngine::new(api_key.as_bytes());
 	hmac_engine.input(&timestamp.to_be_bytes());
-	hmac_engine.input(body);
 	let expected_hmac = Hmac::<sha256::Hash>::from_engine(hmac_engine);
 
-	// Compare HMACs (constant-time comparison via Hash equality)
-	let expected_hex = expected_hmac.to_string();
-	if expected_hex != provided_hmac_hex {
-		return Err(LdkServerError::new(AuthError, "Invalid credentials"));
+	let provided_hmac = provided_hmac_hex
+		.parse::<Hmac<sha256::Hash>>()
+		.map_err(|_| GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Invalid HMAC in x-auth"))?;
+
+	if expected_hmac != provided_hmac {
+		return Err(GrpcStatus::new(GRPC_STATUS_UNAUTHENTICATED, "Invalid credentials"));
 	}
 
 	Ok(())
@@ -168,356 +157,217 @@ pub(crate) struct Context {
 }
 
 impl Service<Request<Incoming>> for NodeService {
-	type Response = Response<Full<Bytes>>;
+	type Response = Response<GrpcBody>;
 	type Error = hyper::Error;
 	type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
 	fn call(&self, req: Request<Incoming>) -> Self::Future {
-		// Extract auth params from headers (validation happens after body is read)
-		let auth_params = match extract_auth_params(&req) {
-			Ok(params) => params,
-			Err(e) => {
-				let (error_response, status_code) = to_error_response(e);
-				return Box::pin(async move {
-					Ok(Response::builder()
-						.status(status_code)
-						.body(Full::new(Bytes::from(error_response.encode_to_vec())))
-						// unwrap safety: body only errors when previous chained calls failed.
-						.unwrap())
-				});
+		// Validate gRPC prerequisites
+		if let Err(status) = validate_grpc_request(&req) {
+			return Box::pin(async move { Ok(grpc_error_response(status)) });
+		}
+
+		// Validate auth before reading the body
+		if let Err(status) = validate_auth(&req, &self.api_key) {
+			return Box::pin(async move { Ok(grpc_error_response(status)) });
+		}
+
+		let context = Arc::clone(&self.context);
+		let path = req.uri().path().to_string();
+		let deadline = req
+			.headers()
+			.get("grpc-timeout")
+			.and_then(|v| v.to_str().ok())
+			.and_then(parse_grpc_timeout);
+
+		// Strip the service prefix to get the method name
+		let method = match path.strip_prefix(GRPC_SERVICE_PREFIX) {
+			Some(m) => m.to_string(),
+			None => {
+				let status =
+					GrpcStatus::new(GRPC_STATUS_UNIMPLEMENTED, format!("Unknown path: {path}"));
+				return Box::pin(async move { Ok(grpc_error_response(status)) });
 			},
 		};
 
-		let context = Context {
-			node: Arc::clone(&self.node),
-			paginated_kv_store: Arc::clone(&self.paginated_kv_store),
-		};
-		let api_key = self.api_key.clone();
-
-		// Exclude '/' from path pattern matching.
-		match &req.uri().path()[1..] {
-			GET_NODE_INFO_PATH => Box::pin(handle_request(
+		let is_streaming = method == SUBSCRIBE_EVENTS_PATH;
+		let future: Self::Future = match method.as_str() {
+			GET_NODE_INFO_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_get_node_info_request))
+			},
+			GET_BALANCES_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_get_balances_request))
+			},
+			ONCHAIN_RECEIVE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_onchain_receive_request))
+			},
+			ONCHAIN_SEND_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_onchain_send_request))
+			},
+			BOLT11_RECEIVE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt11_receive_request))
+			},
+			BOLT11_RECEIVE_FOR_HASH_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt11_receive_for_hash_request))
+			},
+			BOLT11_CLAIM_FOR_HASH_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt11_claim_for_hash_request))
+			},
+			BOLT11_FAIL_FOR_HASH_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt11_fail_for_hash_request))
+			},
+			BOLT11_RECEIVE_VIA_JIT_CHANNEL_PATH => Box::pin(handle_grpc_unary(
 				context,
 				req,
-				auth_params,
-				api_key,
-				handle_get_node_info_request,
-			)),
-			GET_BALANCES_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_get_balances_request,
-			)),
-			ONCHAIN_RECEIVE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_onchain_receive_request,
-			)),
-			ONCHAIN_SEND_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_onchain_send_request,
-			)),
-			BOLT11_RECEIVE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt11_receive_request,
-			)),
-			BOLT11_RECEIVE_FOR_HASH_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt11_receive_for_hash_request,
-			)),
-			BOLT11_CLAIM_FOR_HASH_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt11_claim_for_hash_request,
-			)),
-			BOLT11_FAIL_FOR_HASH_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt11_fail_for_hash_request,
-			)),
-			BOLT11_RECEIVE_VIA_JIT_CHANNEL_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
 				handle_bolt11_receive_via_jit_channel_request,
 			)),
-			BOLT11_RECEIVE_VARIABLE_AMOUNT_VIA_JIT_CHANNEL_PATH => Box::pin(handle_request(
+			BOLT11_RECEIVE_VARIABLE_AMOUNT_VIA_JIT_CHANNEL_PATH => Box::pin(handle_grpc_unary(
 				context,
 				req,
-				auth_params,
-				api_key,
 				handle_bolt11_receive_variable_amount_via_jit_channel_request,
 			)),
-			BOLT11_SEND_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt11_send_request,
-			)),
-			BOLT12_RECEIVE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt12_receive_request,
-			)),
-			BOLT12_SEND_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_bolt12_send_request,
-			)),
-			OPEN_CHANNEL_PATH => {
-				Box::pin(handle_request(context, req, auth_params, api_key, handle_open_channel))
+			BOLT11_SEND_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt11_send_request))
 			},
-			SPLICE_IN_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_splice_in_request,
-			)),
-			SPLICE_OUT_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_splice_out_request,
-			)),
-			CLOSE_CHANNEL_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_close_channel_request,
-			)),
-			FORCE_CLOSE_CHANNEL_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_force_close_channel_request,
-			)),
-			LIST_CHANNELS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_list_channels_request,
-			)),
-			UPDATE_CHANNEL_CONFIG_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_update_channel_config_request,
-			)),
-			GET_PAYMENT_DETAILS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_get_payment_details_request,
-			)),
-			LIST_PAYMENTS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_list_payments_request,
-			)),
-			LIST_FORWARDED_PAYMENTS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_list_forwarded_payments_request,
-			)),
-			CONNECT_PEER_PATH => {
-				Box::pin(handle_request(context, req, auth_params, api_key, handle_connect_peer))
+			BOLT12_RECEIVE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt12_receive_request))
 			},
+			BOLT12_SEND_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_bolt12_send_request))
+			},
+			OPEN_CHANNEL_PATH => Box::pin(handle_grpc_unary(context, req, handle_open_channel)),
+			SPLICE_IN_PATH => Box::pin(handle_grpc_unary(context, req, handle_splice_in_request)),
+			SPLICE_OUT_PATH => Box::pin(handle_grpc_unary(context, req, handle_splice_out_request)),
+			CLOSE_CHANNEL_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_close_channel_request))
+			},
+			FORCE_CLOSE_CHANNEL_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_force_close_channel_request))
+			},
+			LIST_CHANNELS_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_list_channels_request))
+			},
+			UPDATE_CHANNEL_CONFIG_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_update_channel_config_request))
+			},
+			GET_PAYMENT_DETAILS_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_get_payment_details_request))
+			},
+			LIST_PAYMENTS_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_list_payments_request))
+			},
+			LIST_FORWARDED_PAYMENTS_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_list_forwarded_payments_request))
+			},
+			CONNECT_PEER_PATH => Box::pin(handle_grpc_unary(context, req, handle_connect_peer)),
 			DISCONNECT_PEER_PATH => {
-				Box::pin(handle_request(context, req, auth_params, api_key, handle_disconnect_peer))
+				Box::pin(handle_grpc_unary(context, req, handle_disconnect_peer))
 			},
-			LIST_PEERS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_list_peers_request,
-			)),
-			SPONTANEOUS_SEND_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_spontaneous_send_request,
-			)),
-			UNIFIED_SEND_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_unified_send_request,
-			)),
-			SIGN_MESSAGE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_sign_message_request,
-			)),
-			VERIFY_SIGNATURE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_verify_signature_request,
-			)),
-			EXPORT_PATHFINDING_SCORES_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_export_pathfinding_scores_request,
-			)),
-			GRAPH_LIST_CHANNELS_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_graph_list_channels_request,
-			)),
-			GRAPH_GET_CHANNEL_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_graph_get_channel_request,
-			)),
-			GRAPH_LIST_NODES_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_graph_list_nodes_request,
-			)),
-			GRAPH_GET_NODE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_graph_get_node_request,
-			)),
-			DECODE_INVOICE_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_decode_invoice_request,
-			)),
-			DECODE_OFFER_PATH => Box::pin(handle_request(
-				context,
-				req,
-				auth_params,
-				api_key,
-				handle_decode_offer_request,
-			)),
-			path => {
-				let error = format!("Unknown request: {}", path).into_bytes();
-				Box::pin(async {
-					Ok(Response::builder()
-						.status(StatusCode::BAD_REQUEST)
-						.body(Full::new(Bytes::from(error)))
-						// unwrap safety: body only errors when previous chained calls failed.
-						.unwrap())
-				})
+			LIST_PEERS_PATH => Box::pin(handle_grpc_unary(context, req, handle_list_peers_request)),
+			SPONTANEOUS_SEND_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_spontaneous_send_request))
 			},
+			UNIFIED_SEND_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_unified_send_request))
+			},
+			SIGN_MESSAGE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_sign_message_request))
+			},
+			VERIFY_SIGNATURE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_verify_signature_request))
+			},
+			EXPORT_PATHFINDING_SCORES_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_export_pathfinding_scores_request))
+			},
+			GRAPH_LIST_CHANNELS_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_graph_list_channels_request))
+			},
+			GRAPH_GET_CHANNEL_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_graph_get_channel_request))
+			},
+			GRAPH_LIST_NODES_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_graph_list_nodes_request))
+			},
+			GRAPH_GET_NODE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_graph_get_node_request))
+			},
+			DECODE_INVOICE_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_decode_invoice_request))
+			},
+			DECODE_OFFER_PATH => {
+				Box::pin(handle_grpc_unary(context, req, handle_decode_offer_request))
+			},
+			_ => {
+				let status =
+					GrpcStatus::new(GRPC_STATUS_UNIMPLEMENTED, format!("Unknown method: {method}"));
+				Box::pin(async move { Ok(grpc_error_response(status)) })
+			},
+		};
+
+		// Apply grpc-timeout deadline to unary RPCs (not streaming).
+		match deadline {
+			Some(d) if !is_streaming => Box::pin(async move {
+				match tokio::time::timeout(d, future).await {
+					Ok(result) => result,
+					Err(_) => Ok(grpc_error_response(GrpcStatus::new(
+						GRPC_STATUS_DEADLINE_EXCEEDED,
+						"Deadline exceeded",
+					))),
+				}
+			}),
+			_ => future,
 		}
 	}
 }
 
-async fn handle_request<
+async fn handle_grpc_unary<
 	T: Message + Default,
 	R: Message,
 	F: Fn(&Context, T) -> Result<R, LdkServerError>,
 >(
-	context: Context, request: Request<Incoming>, auth_params: AuthParams, api_key: String,
-	handler: F,
-) -> Result<<NodeService as Service<Request<Incoming>>>::Response, hyper::Error> {
-	// Limit the size of the request body to prevent abuse
+	context: Arc<Context>, request: Request<Incoming>, handler: F,
+) -> Result<Response<GrpcBody>, hyper::Error> {
+	// Read and size-limit the request body
 	let limited_body = Limited::new(request.into_body(), MAX_BODY_SIZE);
 	let bytes = match limited_body.collect().await {
 		Ok(collected) => collected.to_bytes(),
 		Err(_) => {
-			let (error_response, status_code) = to_error_response(LdkServerError::new(
-				InvalidRequestError,
-				"Request body too large or failed to read.",
-			));
-			return Ok(Response::builder()
-				.status(status_code)
-				.body(Full::new(Bytes::from(error_response.encode_to_vec())))
-				// unwrap safety: body only errors when previous chained calls failed.
-				.unwrap());
+			return Ok(grpc_error_response(GrpcStatus::new(
+				GRPC_STATUS_INVALID_ARGUMENT,
+				"Request body too large or failed to read",
+			)));
 		},
 	};
 
-	// Validate HMAC authentication with the request body
-	if let Err(e) =
-		validate_hmac_auth(auth_params.timestamp, &auth_params.hmac_hex, &bytes, &api_key)
-	{
-		let (error_response, status_code) = to_error_response(e);
-		return Ok(Response::builder()
-			.status(status_code)
-			.body(Full::new(Bytes::from(error_response.encode_to_vec())))
-			// unwrap safety: body only errors when previous chained calls failed.
-			.unwrap());
-	}
+	// Decode gRPC framing (strip 5-byte header)
+	let proto_bytes = match decode_grpc_body(&bytes) {
+		Ok(b) => b,
+		Err(status) => return Ok(grpc_error_response(status)),
+	};
 
-	match T::decode(bytes) {
-		Ok(request) => match handler(&context, request) {
-			Ok(response) => Ok(Response::builder()
-				.body(Full::new(Bytes::from(response.encode_to_vec())))
-				// unwrap safety: body only errors when previous chained calls failed.
-				.unwrap()),
-			Err(e) => {
-				let (error_response, status_code) = to_error_response(e);
-				Ok(Response::builder()
-					.status(status_code)
-					.body(Full::new(Bytes::from(error_response.encode_to_vec())))
-					// unwrap safety: body only errors when previous chained calls failed.
-					.unwrap())
-			},
-		},
+	// Decode protobuf
+	let req_msg = match T::decode(proto_bytes) {
+		Ok(m) => m,
 		Err(_) => {
-			let (error_response, status_code) =
-				to_error_response(LdkServerError::new(InvalidRequestError, "Malformed request."));
-			Ok(Response::builder()
-				.status(status_code)
-				.body(Full::new(Bytes::from(error_response.encode_to_vec())))
-				// unwrap safety: body only errors when previous chained calls failed.
-				.unwrap())
+			return Ok(grpc_error_response(GrpcStatus::new(
+				GRPC_STATUS_INVALID_ARGUMENT,
+				"Malformed request",
+			)));
 		},
+	};
+
+	// Yield before handler execution to allow cancellation if the client
+	// has already disconnected (e.g., RST_STREAM). Hyper drops the handler
+	// future at yield points when a stream is reset.
+	tokio::task::yield_now().await;
+
+	// Call handler
+	match handler(&context, req_msg) {
+		Ok(response) => {
+			let encoded = encode_grpc_frame(&response.encode_to_vec());
+			Ok(grpc_response(GrpcBody::Unary { data: Some(encoded), trailers_sent: false }))
+		},
+		Err(e) => Ok(grpc_error_response(ldk_error_to_grpc_status(e))),
 	}
 }
 
@@ -525,110 +375,71 @@ async fn handle_request<
 mod tests {
 	use super::*;
 
-	fn compute_hmac(api_key: &str, timestamp: u64, body: &[u8]) -> String {
+	fn compute_hmac(api_key: &str, timestamp: u64) -> String {
 		let mut hmac_engine: HmacEngine<sha256::Hash> = HmacEngine::new(api_key.as_bytes());
 		hmac_engine.input(&timestamp.to_be_bytes());
-		hmac_engine.input(body);
 		Hmac::<sha256::Hash>::from_engine(hmac_engine).to_string()
 	}
 
 	fn create_test_request(auth_header: Option<String>) -> Request<()> {
-		let mut builder = Request::builder();
+		let mut builder =
+			Request::builder().method("POST").header("content-type", "application/grpc+proto");
 		if let Some(header) = auth_header {
-			builder = builder.header("X-Auth", header);
+			builder = builder.header("x-auth", header);
 		}
 		builder.body(()).unwrap()
 	}
 
 	#[test]
-	fn test_extract_auth_params_success() {
+	fn test_validate_auth_success() {
+		let api_key = "test_api_key";
 		let timestamp =
 			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-		let hmac = "8f5a33c2c68fb253899a588308fd13dcaf162d2788966a1fb6cc3aa2e0c51a93";
+		let hmac = compute_hmac(api_key, timestamp);
 		let auth_header = format!("HMAC {timestamp}:{hmac}");
-
 		let req = create_test_request(Some(auth_header));
 
-		let result = extract_auth_params(&req);
-		assert!(result.is_ok());
-		let AuthParams { timestamp: ts, hmac_hex } = result.unwrap();
-		assert_eq!(ts, timestamp);
-		assert_eq!(hmac_hex, hmac);
+		assert!(validate_auth(&req, api_key).is_ok());
 	}
 
 	#[test]
-	fn test_extract_auth_params_missing_header() {
+	fn test_validate_auth_missing_header() {
 		let req = create_test_request(None);
-
-		let result = extract_auth_params(&req);
+		let result = validate_auth(&req, "test_key");
 		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().error_code, AuthError);
+		assert_eq!(result.unwrap_err().code, GRPC_STATUS_UNAUTHENTICATED);
 	}
 
 	#[test]
-	fn test_extract_auth_params_invalid_format() {
-		// Missing "HMAC " prefix
+	fn test_validate_auth_invalid_format() {
 		let req = create_test_request(Some("12345:deadbeef".to_string()));
-
-		let result = extract_auth_params(&req);
+		let result = validate_auth(&req, "test_key");
 		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().error_code, AuthError);
+		assert_eq!(result.unwrap_err().code, GRPC_STATUS_UNAUTHENTICATED);
 	}
 
 	#[test]
-	fn test_validate_hmac_auth_success() {
-		let api_key = "test_api_key".to_string();
-		let body = b"test request body";
+	fn test_validate_auth_wrong_key() {
 		let timestamp =
 			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-		let hmac = compute_hmac(&api_key, timestamp, body);
+		let hmac = compute_hmac("wrong_key", timestamp);
+		let req = create_test_request(Some(format!("HMAC {timestamp}:{hmac}")));
 
-		let result = validate_hmac_auth(timestamp, &hmac, body, &api_key);
-		assert!(result.is_ok());
-	}
-
-	#[test]
-	fn test_validate_hmac_auth_wrong_key() {
-		let api_key = "test_api_key".to_string();
-		let body = b"test request body";
-		let timestamp =
-			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-		// Compute HMAC with wrong key
-		let hmac = compute_hmac("wrong_key", timestamp, body);
-
-		let result = validate_hmac_auth(timestamp, &hmac, body, &api_key);
+		let result = validate_auth(&req, "test_api_key");
 		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().error_code, AuthError);
+		assert_eq!(result.unwrap_err().code, GRPC_STATUS_UNAUTHENTICATED);
 	}
 
 	#[test]
-	fn test_validate_hmac_auth_expired_timestamp() {
-		let api_key = "test_api_key".to_string();
-		let body = b"test request body";
-		// Use a timestamp from 10 minutes ago
+	fn test_validate_auth_expired_timestamp() {
 		let timestamp =
 			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 				- 600;
-		let hmac = compute_hmac(&api_key, timestamp, body);
+		let hmac = compute_hmac("test_api_key", timestamp);
+		let req = create_test_request(Some(format!("HMAC {timestamp}:{hmac}")));
 
-		let result = validate_hmac_auth(timestamp, &hmac, body, &api_key);
+		let result = validate_auth(&req, "test_api_key");
 		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().error_code, AuthError);
-	}
-
-	#[test]
-	fn test_validate_hmac_auth_tampered_body() {
-		let api_key = "test_api_key".to_string();
-		let original_body = b"test request body";
-		let tampered_body = b"tampered body";
-		let timestamp =
-			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-		// Compute HMAC with original body
-		let hmac = compute_hmac(&api_key, timestamp, original_body);
-
-		// Try to validate with tampered body
-		let result = validate_hmac_auth(timestamp, &hmac, tampered_body, &api_key);
-		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().error_code, AuthError);
+		assert_eq!(result.unwrap_err().code, GRPC_STATUS_UNAUTHENTICATED);
 	}
 }

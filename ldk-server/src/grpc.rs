@@ -23,8 +23,10 @@ use hyper::{Request, Response};
 use crate::api::error::{LdkServerError, LdkServerErrorCode};
 
 // gRPC status codes (a subset — only those we use).
+#[allow(dead_code)] // Used by streaming responses (SubscribeEvents)
 pub(crate) const GRPC_STATUS_OK: u32 = 0;
 pub(crate) const GRPC_STATUS_INVALID_ARGUMENT: u32 = 3;
+pub(crate) const GRPC_STATUS_DEADLINE_EXCEEDED: u32 = 4;
 pub(crate) const GRPC_STATUS_FAILED_PRECONDITION: u32 = 9;
 pub(crate) const GRPC_STATUS_UNIMPLEMENTED: u32 = 12;
 pub(crate) const GRPC_STATUS_INTERNAL: u32 = 13;
@@ -230,6 +232,28 @@ pub(crate) fn validate_grpc_request(req: &Request<Incoming>) -> Result<(), GrpcS
 	Ok(())
 }
 
+/// Parse the `grpc-timeout` header value into a `Duration`.
+///
+/// Format: `<number><unit>` where unit is one of:
+/// `H` (hours), `M` (minutes), `S` (seconds), `m` (milliseconds),
+/// `u` (microseconds), `n` (nanoseconds).
+pub(crate) fn parse_grpc_timeout(value: &str) -> Option<std::time::Duration> {
+	if value.len() < 2 {
+		return None;
+	}
+	let (num_str, unit) = value.split_at(value.len() - 1);
+	let num: u64 = num_str.parse().ok()?;
+	match unit {
+		"H" => Some(std::time::Duration::from_secs(num * 3600)),
+		"M" => Some(std::time::Duration::from_secs(num * 60)),
+		"S" => Some(std::time::Duration::from_secs(num)),
+		"m" => Some(std::time::Duration::from_millis(num)),
+		"u" => Some(std::time::Duration::from_micros(num)),
+		"n" => Some(std::time::Duration::from_nanos(num)),
+		_ => None,
+	}
+}
+
 /// Retrieve a gRPC metadata value from request headers.
 ///
 /// Per the gRPC spec, headers ending in `-bin` contain base64-encoded binary data.
@@ -328,5 +352,19 @@ mod tests {
 	fn test_get_grpc_metadata_missing() {
 		let headers = hyper::http::HeaderMap::new();
 		assert_eq!(get_grpc_metadata(&headers, "x-missing"), None);
+	}
+
+	#[test]
+	fn test_parse_grpc_timeout() {
+		use std::time::Duration;
+		assert_eq!(parse_grpc_timeout("5S"), Some(Duration::from_secs(5)));
+		assert_eq!(parse_grpc_timeout("500m"), Some(Duration::from_millis(500)));
+		assert_eq!(parse_grpc_timeout("1H"), Some(Duration::from_secs(3600)));
+		assert_eq!(parse_grpc_timeout("30M"), Some(Duration::from_secs(1800)));
+		assert_eq!(parse_grpc_timeout("100u"), Some(Duration::from_micros(100)));
+		assert_eq!(parse_grpc_timeout("1000n"), Some(Duration::from_nanos(1000)));
+		assert_eq!(parse_grpc_timeout(""), None);
+		assert_eq!(parse_grpc_timeout("S"), None);
+		assert_eq!(parse_grpc_timeout("5x"), None);
 	}
 }
