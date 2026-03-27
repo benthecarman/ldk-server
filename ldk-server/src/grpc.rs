@@ -19,6 +19,7 @@ use hyper::body::{Frame, Incoming};
 use hyper::header::HeaderValue;
 use hyper::http::HeaderMap;
 use hyper::{Request, Response};
+use tokio::sync::mpsc;
 
 use crate::api::error::{LdkServerError, LdkServerErrorCode};
 
@@ -30,6 +31,7 @@ pub(crate) const GRPC_STATUS_DEADLINE_EXCEEDED: u32 = 4;
 pub(crate) const GRPC_STATUS_FAILED_PRECONDITION: u32 = 9;
 pub(crate) const GRPC_STATUS_UNIMPLEMENTED: u32 = 12;
 pub(crate) const GRPC_STATUS_INTERNAL: u32 = 13;
+pub(crate) const GRPC_STATUS_UNAVAILABLE: u32 = 14;
 pub(crate) const GRPC_STATUS_UNAUTHENTICATED: u32 = 16;
 
 /// A gRPC status with code and human-readable message.
@@ -159,6 +161,9 @@ pub(crate) enum GrpcBody {
 	Unary { data: Option<Bytes>, trailers_sent: bool },
 	/// Empty body for Trailers-Only responses (error status is in the HTTP response headers).
 	Empty,
+	/// Multiple gRPC-framed messages streamed from a channel, followed by trailers.
+	/// Send `Err(GrpcStatus)` to terminate the stream with an error status.
+	Stream { rx: mpsc::Receiver<Result<Bytes, GrpcStatus>>, done: bool },
 }
 
 impl hyper::body::Body for GrpcBody {
@@ -181,6 +186,24 @@ impl hyper::body::Body for GrpcBody {
 				}
 			},
 			GrpcBody::Empty => Poll::Ready(None),
+			GrpcBody::Stream { rx, done } => {
+				if *done {
+					return Poll::Ready(None);
+				}
+				match rx.poll_recv(_cx) {
+					Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+					Poll::Ready(Some(Err(status))) => {
+						*done = true;
+						Poll::Ready(Some(Ok(Frame::trailers(error_trailers(&status)))))
+					},
+					Poll::Ready(None) => {
+						// Channel closed normally — send OK trailers
+						*done = true;
+						Poll::Ready(Some(Ok(Frame::trailers(ok_trailers()))))
+					},
+					Poll::Pending => Poll::Pending,
+				}
+			},
 		}
 	}
 }

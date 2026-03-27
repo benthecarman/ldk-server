@@ -12,20 +12,20 @@ use std::time::Duration;
 
 use e2e_tests::{
 	find_available_port, mine_and_sync, run_cli, run_cli_raw, setup_funded_channel,
-	wait_for_onchain_balance, LdkServerHandle, RabbitMqEventConsumer, TestBitcoind,
+	wait_for_onchain_balance, LdkServerHandle, TestBitcoind,
 };
+use ldk_node::lightning::ln::msgs::SocketAddress;
 use hex_conservative::{DisplayHex, FromHex};
 use ldk_node::bitcoin::hashes::{sha256, Hash};
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_client::ldk_server_protos::api::{
 	Bolt11ReceiveRequest, Bolt12ReceiveRequest, OnchainReceiveRequest,
 };
+use ldk_server_client::ldk_server_protos::events::event_envelope::Event;
 use ldk_server_client::ldk_server_protos::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription,
 };
-use ldk_server_protos::events::event_envelope::Event;
 
 #[tokio::test]
 async fn test_cli_get_node_info() {
@@ -446,15 +446,15 @@ async fn test_cli_update_channel_config() {
 	assert!(output.is_object());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cli_bolt11_send() {
 	let bitcoind = TestBitcoind::new();
 	let server_a = LdkServerHandle::start(&bitcoind).await;
 	let server_b = LdkServerHandle::start(&bitcoind).await;
 
-	// Set up event consumers before any payments
-	let mut consumer_a = RabbitMqEventConsumer::new(&server_a.exchange_name).await;
-	let mut consumer_b = RabbitMqEventConsumer::new(&server_b.exchange_name).await;
+	// Subscribe to events before the payment
+	let mut events_a = server_a.client().subscribe_events().await.unwrap();
+	let mut events_b = server_b.client().subscribe_events().await.unwrap();
 
 	setup_funded_channel(&bitcoind, &server_a, &server_b, 100_000).await;
 
@@ -476,18 +476,26 @@ async fn test_cli_bolt11_send() {
 	assert!(!output["payment_id"].as_str().unwrap().is_empty());
 
 	// Verify events
-	tokio::time::sleep(Duration::from_secs(5)).await;
-
-	let events_a = consumer_a.consume_events(5, Duration::from_secs(10)).await;
+	let event_a = tokio::time::timeout(Duration::from_secs(15), events_a.next_event())
+		.await
+		.expect("Timed out waiting for sender event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_a.iter().any(|e| matches!(&e.event, Some(Event::PaymentSuccessful(_)))),
-		"Expected PaymentSuccessful on sender"
+		matches!(&event_a.event, Some(Event::PaymentSuccessful(_))),
+		"Expected PaymentSuccessful on sender, got: {:?}",
+		event_a.event
 	);
 
-	let events_b = consumer_b.consume_events(5, Duration::from_secs(10)).await;
+	let event_b = tokio::time::timeout(Duration::from_secs(15), events_b.next_event())
+		.await
+		.expect("Timed out waiting for receiver event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentReceived(_)))),
-		"Expected PaymentReceived on receiver"
+		matches!(&event_b.event, Some(Event::PaymentReceived(_))),
+		"Expected PaymentReceived on receiver, got: {:?}",
+		event_b.event
 	);
 }
 
@@ -552,14 +560,14 @@ async fn test_cli_bolt12_send() {
 	assert!(!output["payment_id"].as_str().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cli_spontaneous_send() {
 	let bitcoind = TestBitcoind::new();
 	let server_a = LdkServerHandle::start(&bitcoind).await;
 	let server_b = LdkServerHandle::start(&bitcoind).await;
 
-	let mut consumer_a = RabbitMqEventConsumer::new(&server_a.exchange_name).await;
-	let mut consumer_b = RabbitMqEventConsumer::new(&server_b.exchange_name).await;
+	let mut events_a = server_a.client().subscribe_events().await.unwrap();
+	let mut events_b = server_b.client().subscribe_events().await.unwrap();
 
 	setup_funded_channel(&bitcoind, &server_a, &server_b, 100_000).await;
 
@@ -567,18 +575,26 @@ async fn test_cli_spontaneous_send() {
 	assert!(!output["payment_id"].as_str().unwrap().is_empty());
 
 	// Verify events
-	tokio::time::sleep(Duration::from_secs(5)).await;
-
-	let events_a = consumer_a.consume_events(5, Duration::from_secs(10)).await;
+	let event_a = tokio::time::timeout(Duration::from_secs(15), events_a.next_event())
+		.await
+		.expect("Timed out waiting for sender event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_a.iter().any(|e| matches!(&e.event, Some(Event::PaymentSuccessful(_)))),
-		"Expected PaymentSuccessful on sender"
+		matches!(&event_a.event, Some(Event::PaymentSuccessful(_))),
+		"Expected PaymentSuccessful on sender, got: {:?}",
+		event_a.event
 	);
 
-	let events_b = consumer_b.consume_events(5, Duration::from_secs(10)).await;
+	let event_b = tokio::time::timeout(Duration::from_secs(15), events_b.next_event())
+		.await
+		.expect("Timed out waiting for receiver event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentReceived(_)))),
-		"Expected PaymentReceived on receiver"
+		matches!(&event_b.event, Some(Event::PaymentReceived(_))),
+		"Expected PaymentReceived on receiver, got: {:?}",
+		event_b.event
 	);
 }
 
@@ -782,8 +798,8 @@ async fn test_forwarded_payment_event() {
 	// B: LSP node (all e2e servers include LSPS2 service config)
 	let server_b = LdkServerHandle::start(&bitcoind).await;
 
-	// Set up RabbitMQ consumer on B before any payments
-	let mut consumer_b = RabbitMqEventConsumer::new(&server_b.exchange_name).await;
+	// Subscribe to events on B before any payments
+	let mut events_b = server_b.client().subscribe_events().await.unwrap();
 
 	// Open channel A -> B (1M sats, larger for JIT forwarding)
 	setup_funded_channel(&bitcoind, &server_a, &server_b, 1_000_000).await;
@@ -821,7 +837,6 @@ async fn test_forwarded_payment_event() {
 	let node_c = builder_c.build(node_entropy_c).unwrap();
 
 	node_c.start().unwrap();
-
 	node_c.sync_wallets().unwrap();
 
 	// C generates JIT invoice via LSPS2
@@ -841,27 +856,36 @@ async fn test_forwarded_payment_event() {
 
 	// Mine blocks to confirm JIT channel
 	mine_and_sync(&bitcoind, &[&server_a, &server_b], 6).await;
-	tokio::time::sleep(Duration::from_secs(5)).await;
+	tokio::time::sleep(Duration::from_secs(10)).await;
 
-	// Verify PaymentForwarded event on B
-	let events_b = consumer_b.consume_events(10, Duration::from_secs(15)).await;
-	assert!(
-		events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentForwarded(_)))),
-		"Expected PaymentForwarded event on LSP node B, got events: {:?}",
-		events_b.iter().map(|e| &e.event).collect::<Vec<_>>()
-	);
+	// Verify PaymentForwarded event on B (drain other events)
+	let forwarded = tokio::time::timeout(Duration::from_secs(30), async {
+		loop {
+			match events_b.next_event().await {
+				Some(Ok(ev)) if matches!(&ev.event, Some(Event::PaymentForwarded(_))) => {
+					return ev;
+				},
+				Some(Ok(_)) => continue, // drain non-matching events
+				Some(Err(e)) => panic!("Error reading event stream: {e}"),
+				None => panic!("Event stream ended without PaymentForwarded"),
+			}
+		}
+	})
+	.await
+	.expect("Timed out waiting for PaymentForwarded event on LSP node B");
+	assert!(matches!(&forwarded.event, Some(Event::PaymentForwarded(_))));
 
 	node_c.stop().unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_hodl_invoice_claim() {
 	let bitcoind = TestBitcoind::new();
 	let server_a = LdkServerHandle::start(&bitcoind).await;
 	let server_b = LdkServerHandle::start(&bitcoind).await;
 
-	let mut consumer_a = RabbitMqEventConsumer::new(&server_a.exchange_name).await;
-	let mut consumer_b = RabbitMqEventConsumer::new(&server_b.exchange_name).await;
+	let mut events_a = server_a.client().subscribe_events().await.unwrap();
+	let mut events_b = server_b.client().subscribe_events().await.unwrap();
 
 	setup_funded_channel(&bitcoind, &server_a, &server_b, 100_000).await;
 
@@ -896,13 +920,18 @@ async fn test_hodl_invoice_claim() {
 		// Pay the hodl invoice from A
 		run_cli(&server_a, &["bolt11-send", invoice]);
 
-		// Verify PaymentClaimable event on B
-		let events_b = consumer_b.consume_events(1, Duration::from_secs(10)).await;
-		assert!(
-			events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentClaimable(_)))),
-			"Expected PaymentClaimable on receiver, got events: {:?}",
-			events_b.iter().map(|e| &e.event).collect::<Vec<_>>()
-		);
+		// Wait for PaymentClaimable event on B (drain other events)
+		let claimable = tokio::time::timeout(Duration::from_secs(15), async {
+			while let Some(Ok(ev)) = events_b.next_event().await {
+				if matches!(&ev.event, Some(Event::PaymentClaimable(_))) {
+					return ev;
+				}
+			}
+			panic!("Event stream ended without PaymentClaimable");
+		})
+		.await
+		.expect("Timed out waiting for PaymentClaimable event");
+		assert!(matches!(&claimable.event, Some(Event::PaymentClaimable(_))));
 
 		// Claim the payment on B
 		let mut args: Vec<&str> = vec!["bolt11-claim-for-hash", &preimage_hex];
@@ -914,36 +943,29 @@ async fn test_hodl_invoice_claim() {
 		}
 		run_cli(&server_b, &args);
 
-		// Verify PaymentReceived event on B
-		let events_b = consumer_b.consume_events(1, Duration::from_secs(10)).await;
-		assert!(
-			events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentReceived(_)))),
-			"Expected PaymentReceived on receiver after claim, got events: {:?}",
-			events_b.iter().map(|e| &e.event).collect::<Vec<_>>()
-		);
-
-		// Verify PaymentSuccessful on A
-		let events_a = consumer_a.consume_events(1, Duration::from_secs(10)).await;
-		assert!(
-			events_a.iter().any(|e| matches!(&e.event, Some(Event::PaymentSuccessful(_)))),
-			"Expected PaymentSuccessful on sender, got events: {:?}",
-			events_a.iter().map(|e| &e.event).collect::<Vec<_>>()
-		);
+		// Wait for PaymentSuccessful on A after claim (drain other events)
+		let successful = tokio::time::timeout(Duration::from_secs(15), async {
+			while let Some(Ok(ev)) = events_a.next_event().await {
+				if matches!(&ev.event, Some(Event::PaymentSuccessful(_))) {
+					return ev;
+				}
+			}
+			panic!("Event stream ended without PaymentSuccessful");
+		})
+		.await
+		.expect("Timed out waiting for PaymentSuccessful event");
+		assert!(matches!(&successful.event, Some(Event::PaymentSuccessful(_))));
 	}
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_hodl_invoice_fail() {
-	use hex_conservative::DisplayHex;
-	use ldk_node::bitcoin::hashes::{sha256, Hash};
-
 	let bitcoind = TestBitcoind::new();
 	let server_a = LdkServerHandle::start(&bitcoind).await;
 	let server_b = LdkServerHandle::start(&bitcoind).await;
 
-	// Set up event consumers before any payments
-	let mut consumer_a = RabbitMqEventConsumer::new(&server_a.exchange_name).await;
-	let mut consumer_b = RabbitMqEventConsumer::new(&server_b.exchange_name).await;
+	let mut events_a = server_a.client().subscribe_events().await.unwrap();
+	let mut events_b = server_b.client().subscribe_events().await.unwrap();
 
 	setup_funded_channel(&bitcoind, &server_a, &server_b, 100_000).await;
 
@@ -970,28 +992,30 @@ async fn test_hodl_invoice_fail() {
 	// Pay the hodl invoice from A
 	run_cli(&server_a, &["bolt11-send", invoice]);
 
-	// Wait for payment to arrive at B
-	tokio::time::sleep(Duration::from_secs(5)).await;
-
 	// Verify PaymentClaimable event on B
-	let events_b = consumer_b.consume_events(5, Duration::from_secs(10)).await;
+	let event_b = tokio::time::timeout(Duration::from_secs(15), events_b.next_event())
+		.await
+		.expect("Timed out waiting for PaymentClaimable event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_b.iter().any(|e| matches!(&e.event, Some(Event::PaymentClaimable(_)))),
-		"Expected PaymentClaimable on receiver, got events: {:?}",
-		events_b.iter().map(|e| &e.event).collect::<Vec<_>>()
+		matches!(&event_b.event, Some(Event::PaymentClaimable(_))),
+		"Expected PaymentClaimable on receiver, got: {:?}",
+		event_b.event
 	);
 
 	// Fail the payment on B using CLI
 	run_cli(&server_b, &["bolt11-fail-for-hash", &payment_hash_hex]);
 
-	// Wait for failure to propagate
-	tokio::time::sleep(Duration::from_secs(5)).await;
-
 	// Verify PaymentFailed on A
-	let events_a = consumer_a.consume_events(10, Duration::from_secs(10)).await;
+	let event_a = tokio::time::timeout(Duration::from_secs(15), events_a.next_event())
+		.await
+		.expect("Timed out waiting for PaymentFailed event")
+		.expect("Event stream ended")
+		.expect("Failed to decode event");
 	assert!(
-		events_a.iter().any(|e| matches!(&e.event, Some(Event::PaymentFailed(_)))),
-		"Expected PaymentFailed on sender after hodl rejection, got events: {:?}",
-		events_a.iter().map(|e| &e.event).collect::<Vec<_>>()
+		matches!(&event_a.event, Some(Event::PaymentFailed(_))),
+		"Expected PaymentFailed on sender, got: {:?}",
+		event_a.event
 	);
 }

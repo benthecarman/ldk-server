@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bitcoin_hashes::hmac::{Hmac, HmacEngine};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
+use ldk_server_protos::api::SubscribeEventsRequest;
 use ldk_server_protos::api::{
 	Bolt11ClaimForHashRequest, Bolt11ClaimForHashResponse, Bolt11FailForHashRequest,
 	Bolt11FailForHashResponse, Bolt11ReceiveForHashRequest, Bolt11ReceiveForHashResponse,
@@ -44,8 +45,10 @@ use ldk_server_protos::endpoints::{
 	GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH, LIST_CHANNELS_PATH,
 	LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH, ONCHAIN_RECEIVE_PATH,
 	ONCHAIN_SEND_PATH, OPEN_CHANNEL_PATH, SIGN_MESSAGE_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
-	SPONTANEOUS_SEND_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
+	SPONTANEOUS_SEND_PATH, SUBSCRIBE_EVENTS_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH,
+	VERIFY_SIGNATURE_PATH,
 };
+use ldk_server_protos::events::EventEnvelope;
 use prost::Message;
 use reqwest::{Certificate, Client};
 
@@ -364,6 +367,54 @@ impl LdkServerClient {
 		self.grpc_unary(&request, GRAPH_GET_NODE_PATH).await
 	}
 
+	/// Subscribe to a stream of server events via server-streaming gRPC.
+	///
+	/// Returns an [`EventStream`] that yields [`EventEnvelope`] messages as they arrive.
+	pub async fn subscribe_events(&self) -> Result<EventStream, LdkServerError> {
+		let request = SubscribeEventsRequest {};
+		let proto_bytes = request.encode_to_vec();
+		let mut grpc_body = Vec::with_capacity(5 + proto_bytes.len());
+		grpc_body.push(0u8);
+		grpc_body.extend_from_slice(&(proto_bytes.len() as u32).to_be_bytes());
+		grpc_body.extend_from_slice(&proto_bytes);
+
+		let url =
+			format!("https://{}{}{}", self.base_url, GRPC_SERVICE_PREFIX, SUBSCRIBE_EVENTS_PATH);
+		let auth_header = self.compute_auth_header();
+
+		let response = self
+			.client
+			.post(&url)
+			.header("content-type", "application/grpc+proto")
+			.header("te", "trailers")
+			.header("x-auth", auth_header)
+			.body(grpc_body)
+			.send()
+			.await
+			.map_err(|e| {
+				LdkServerError::new(InternalError, format!("gRPC request failed: {}", e))
+			})?;
+
+		// Check for Trailers-Only error
+		if let Some(status_val) = response.headers().get("grpc-status") {
+			if let Ok(status_str) = status_val.to_str() {
+				if let Ok(code) = status_str.parse::<u32>() {
+					if code != 0 {
+						let message = response
+							.headers()
+							.get("grpc-message")
+							.and_then(|v| v.to_str().ok())
+							.map(percent_decode)
+							.unwrap_or_default();
+						return Err(grpc_code_to_error(code, message));
+					}
+				}
+			}
+		}
+
+		Ok(EventStream { response, buf: Vec::new() })
+	}
+
 	/// Send a unary gRPC request and decode the response.
 	async fn grpc_unary<Rq: Message, Rs: Message + Default>(
 		&self, request: &Rq, method: &str,
@@ -470,5 +521,49 @@ fn hex_val(b: u8) -> Option<u8> {
 		b'A'..=b'F' => Some(b - b'A' + 10),
 		b'a'..=b'f' => Some(b - b'a' + 10),
 		_ => None,
+	}
+}
+
+/// A streaming response from the `SubscribeEvents` RPC.
+///
+/// Call [`next_event`](EventStream::next_event) to receive the next event from the server.
+pub struct EventStream {
+	response: reqwest::Response,
+	buf: Vec<u8>,
+}
+
+impl EventStream {
+	/// Wait for the next event from the server.
+	///
+	/// Returns `None` if the stream has ended.
+	pub async fn next_event(&mut self) -> Option<Result<EventEnvelope, LdkServerError>> {
+		loop {
+			// Try to decode a complete gRPC frame from the buffer
+			if self.buf.len() >= 5 {
+				let msg_len =
+					u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]])
+						as usize;
+				if self.buf.len() >= 5 + msg_len {
+					let proto_bytes = &self.buf[5..5 + msg_len];
+					let result = EventEnvelope::decode(proto_bytes).map_err(|e| {
+						LdkServerError::new(InternalError, format!("Failed to decode event: {}", e))
+					});
+					self.buf.drain(..5 + msg_len);
+					return Some(result);
+				}
+			}
+
+			// Need more data — read the next chunk from the response body
+			match self.response.chunk().await {
+				Ok(Some(chunk)) => self.buf.extend_from_slice(&chunk),
+				Ok(None) => return None, // stream ended
+				Err(e) => {
+					return Some(Err(LdkServerError::new(
+						InternalError,
+						format!("Failed to read event stream: {}", e),
+					)));
+				},
+			}
+		}
 	}
 }

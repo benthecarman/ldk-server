@@ -28,7 +28,8 @@ use ldk_server_protos::endpoints::{
 	GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH, LIST_CHANNELS_PATH,
 	LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH, ONCHAIN_RECEIVE_PATH,
 	ONCHAIN_SEND_PATH, OPEN_CHANNEL_PATH, SIGN_MESSAGE_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
-	SPONTANEOUS_SEND_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
+	SPONTANEOUS_SEND_PATH, SUBSCRIBE_EVENTS_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH,
+	VERIFY_SIGNATURE_PATH,
 };
 use prost::Message;
 use tokio::sync::broadcast;
@@ -71,11 +72,14 @@ use crate::api::spontaneous_send::handle_spontaneous_send_request;
 use crate::api::unified_send::handle_unified_send_request;
 use crate::api::update_channel_config::handle_update_channel_config_request;
 use crate::api::verify_signature::handle_verify_signature_request;
+use ldk_server_protos::events::EventEnvelope;
+use tokio::sync::mpsc;
+
 use crate::grpc::{
 	decode_grpc_body, encode_grpc_frame, grpc_error_response, grpc_response,
 	ldk_error_to_grpc_status, parse_grpc_timeout, validate_grpc_request, GrpcBody, GrpcStatus,
 	GRPC_STATUS_DEADLINE_EXCEEDED, GRPC_STATUS_INVALID_ARGUMENT, GRPC_STATUS_UNAUTHENTICATED,
-	GRPC_STATUS_UNIMPLEMENTED,
+	GRPC_STATUS_UNAVAILABLE, GRPC_STATUS_UNIMPLEMENTED,
 };
 use crate::io::persist::paginated_kv_store::PaginatedKVStore;
 
@@ -89,17 +93,18 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 pub(crate) struct NodeService {
 	context: Arc<Context>,
 	api_key: String,
-	#[allow(dead_code)]
-	event_sender: broadcast::Sender<ldk_server_protos::events::EventEnvelope>,
+	event_sender: broadcast::Sender<EventEnvelope>,
+	shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl NodeService {
 	pub(crate) fn new(
 		node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore>, api_key: String,
-		event_sender: broadcast::Sender<ldk_server_protos::events::EventEnvelope>,
+		event_sender: broadcast::Sender<EventEnvelope>,
+		shutdown_rx: tokio::sync::watch::Receiver<bool>,
 	) -> Self {
 		let context = Arc::new(Context { node, paginated_kv_store });
-		Self { context, api_key, event_sender }
+		Self { context, api_key, event_sender, shutdown_rx }
 	}
 }
 
@@ -296,6 +301,52 @@ impl Service<Request<Incoming>> for NodeService {
 			},
 			DECODE_OFFER_PATH => {
 				Box::pin(handle_grpc_unary(context, req, handle_decode_offer_request))
+			},
+			SUBSCRIBE_EVENTS_PATH => {
+				let event_sender = self.event_sender.clone();
+				let mut shutdown_rx = self.shutdown_rx.clone();
+				Box::pin(async move {
+					let mut rx = event_sender.subscribe();
+					let (tx, mpsc_rx) = mpsc::channel::<Result<bytes::Bytes, GrpcStatus>>(64);
+					tokio::spawn(async move {
+						loop {
+							tokio::select! {
+								result = rx.recv() => {
+									match result {
+										Ok(event) => {
+											let frame = encode_grpc_frame(&event.encode_to_vec());
+											if tx.send(Ok(frame)).await.is_err() {
+												break; // client disconnected
+											}
+										},
+										Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+											continue; // skip missed events, keep streaming
+										},
+										Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+											let _ = tx
+												.send(Err(GrpcStatus::new(
+													GRPC_STATUS_UNAVAILABLE,
+													"server shutting down",
+												)))
+												.await;
+											break;
+										},
+									}
+								},
+								_ = shutdown_rx.changed() => {
+									let _ = tx
+										.send(Err(GrpcStatus::new(
+											GRPC_STATUS_UNAVAILABLE,
+											"server shutting down",
+										)))
+										.await;
+									break;
+								},
+							}
+						}
+					});
+					Ok(grpc_response(GrpcBody::Stream { rx: mpsc_rx, done: false }))
+				})
 			},
 			_ => {
 				let status =

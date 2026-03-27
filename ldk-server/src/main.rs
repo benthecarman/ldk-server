@@ -221,6 +221,7 @@ fn main() {
 		});
 
 	let (event_sender, _) = broadcast::channel::<EventEnvelope>(1024);
+	let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
 	info!("Starting up...");
 	match node.start() {
@@ -420,6 +421,7 @@ fn main() {
 								Arc::clone(&paginated_store),
 								api_key.clone(),
 								event_sender.clone(),
+								shutdown_rx.clone(),
 							);
 							let acceptor = tls_acceptor.clone();
 							runtime.spawn(async move {
@@ -439,6 +441,7 @@ fn main() {
 				}
 				_ = tokio::signal::ctrl_c() => {
 					info!("Received CTRL-C, shutting down..");
+					let _ = shutdown_tx.send(true);
 					break;
 				}
 				_ = sighup_stream.recv() => {
@@ -448,6 +451,7 @@ fn main() {
 				}
 				_ = sigterm_stream.recv() => {
 					info!("Received SIGTERM, shutting down..");
+					let _ = shutdown_tx.send(true);
 					break;
 				}
 			}
