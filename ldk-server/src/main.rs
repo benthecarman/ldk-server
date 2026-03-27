@@ -8,6 +8,7 @@
 // licenses.
 
 mod api;
+mod grpc;
 mod io;
 mod service;
 mod util;
