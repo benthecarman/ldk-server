@@ -374,7 +374,8 @@ impl Service<Request<Incoming>> for NodeService {
 async fn handle_grpc_unary<
 	T: Message + Default,
 	R: Message,
-	F: Fn(&Context, T) -> Result<R, LdkServerError>,
+	Fut: Future<Output = Result<R, LdkServerError>> + Send,
+	F: Fn(Arc<Context>, T) -> Fut + Send,
 >(
 	context: Arc<Context>, request: Request<Incoming>, handler: F,
 ) -> Result<Response<GrpcBody>, hyper::Error> {
@@ -413,7 +414,7 @@ async fn handle_grpc_unary<
 	tokio::task::yield_now().await;
 
 	// Call handler
-	match handler(&context, req_msg) {
+	match handler(context, req_msg).await {
 		Ok(response) => {
 			let encoded = encode_grpc_frame(&response.encode_to_vec());
 			Ok(grpc_response(GrpcBody::Unary { data: Some(encoded), trailers_sent: false }))
