@@ -61,8 +61,27 @@ Leave the field unset to disable async payments.
 
 ### `[storage.disk]`
 
-Where persistent data is stored. Defaults to `~/.ldk-server/` on Linux and
-`~/Library/Application Support/ldk-server/` on macOS.
+Where local ldk-server data is stored. Defaults to `~/.ldk-server/` on Linux and
+`~/Library/Application Support/ldk-server/` on macOS. This directory is still used for
+the node mnemonic, API key, TLS material, logs, and ldk-server's payment history when
+LDK Node wallet/channel state uses PostgreSQL.
+
+### `[storage.postgres]`
+
+Optional PostgreSQL storage for LDK Node wallet and channel state.
+
+```toml
+[storage.postgres]
+connection_string = "postgresql://postgres:postgres@localhost:5432"
+db_name = "ldk_db"
+kv_table_name = "ldk_data"
+certificate_path = "/path/to/postgres-ca.pem"
+```
+
+Only `connection_string` is required. `db_name`, `kv_table_name`, and `certificate_path`
+are optional. If `db_name` is set, do not also include a database name in the connection
+string. If `certificate_path` is set, the file must contain a PEM-encoded CA certificate
+for TLS PostgreSQL connections.
 
 ### `[log]`
 
@@ -173,3 +192,7 @@ The mnemonic is the node's master secret, required to recover on-chain funds. On
 ldk-server generates a fresh 24-word BIP39 mnemonic at `<storage_dir>/keys_mnemonic` if the file
 does not already exist. `ldk_node_data.sqlite` holds channel state, both are required to recover
 channel funds. See [Operations - Backups](operations.md#backups) for backup guidance.
+
+When `[storage.postgres]` is configured, LDK Node wallet/channel state is stored in
+PostgreSQL instead of `ldk_node_data.sqlite`. The storage directory remains required for
+the mnemonic, API key, TLS material, logs, and `ldk_server_data.sqlite`.

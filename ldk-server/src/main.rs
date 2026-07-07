@@ -49,7 +49,7 @@ use crate::io::persist::{
 	PAYMENTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::service::NodeService;
-use crate::util::config::{load_config, ArgsConfig, ChainSource};
+use crate::util::config::{load_config, ArgsConfig, ChainSource, LdkNodeStorageConfig};
 use crate::util::logger::{LogConfig, ServerLogger};
 use crate::util::metrics::Metrics;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
@@ -253,7 +253,7 @@ fn main() {
 		},
 	};
 
-	let node = match builder.build(node_entropy) {
+	let node = match build_node(builder, node_entropy, config_file.ldk_node_storage) {
 		Ok(node) => Arc::new(node),
 		Err(e) => {
 			error!("Failed to build LDK Node: {e}");
@@ -686,6 +686,27 @@ fn main() {
 	node.stop().expect("Shutdown should always succeed.");
 	info!("Shutdown complete..");
 	log::logger().flush();
+}
+
+fn build_node(
+	builder: Builder, node_entropy: ldk_node::entropy::NodeEntropy,
+	ldk_node_storage: LdkNodeStorageConfig,
+) -> Result<Node, ldk_node::BuildError> {
+	match ldk_node_storage {
+		LdkNodeStorageConfig::Sqlite => builder.build(node_entropy),
+		LdkNodeStorageConfig::Postgres {
+			connection_string,
+			db_name,
+			kv_table_name,
+			certificate_pem,
+		} => builder.build_with_postgres_store(
+			node_entropy,
+			connection_string,
+			db_name,
+			kv_table_name,
+			certificate_pem,
+		),
+	}
 }
 
 fn send_event_and_upsert_payment(
