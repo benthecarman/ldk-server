@@ -9,6 +9,10 @@ The primary goal of LDK Server is to provide an efficient, stable, and API-first
 a Lightning Network node. With its streamlined setup, LDK Server enables users to easily set up, configure, and run
 a Lightning node while exposing a robust, language-agnostic API via [Protocol Buffers (Protobuf)](https://protobuf.dev/).
 
+> **Warning**
+> LDK Server is still under active development and is not ready for production use. Until the v0.1 release, the
+> persisted data model may change in non-backwards-compatible ways. Do not run it with funds you cannot afford to lose.
+
 ## Workspace Crates
 
 - `ldk-server`: daemon that runs the Lightning node and exposes the API
