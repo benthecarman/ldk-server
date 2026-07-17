@@ -59,6 +59,45 @@ this node to go offline. Set `async_payments_role = "server"` to hold async paym
 and onion messages for peers. The server role requires an announceable node configuration.
 Leave the field unset to disable async payments.
 
+### `[probing]`
+
+Enables LDK Node's background probing service to train the payment scorer with current
+channel-liquidity information. Probing is disabled when this section and the corresponding
+CLI/environment options are absent.
+
+The `strategy` field selects one of two path-selection methods:
+
+- **`"high_degree"`** probes toward highly connected public nodes. The service uses the
+  payment scorer to select a path.
+- **`"random_walk"`** constructs random paths through the public graph. This strategy does
+  not use the payment scorer to select a path.
+
+The section accepts these fields:
+
+| Field | Requirement and default | Description |
+| --- | --- | --- |
+| `strategy` | Required. No default. | Selects `"high_degree"` or `"random_walk"`. Start with `"random_walk"` for a payment node. Use `"high_degree"` for a dedicated probing node. |
+| `top_node_count` | Required for `"high_degree"`. No default. Start with `100`. | Sets the number of highly connected public nodes in the destination set. The strategy cycles through this set. The value must be greater than `0`. |
+| `max_hops` | Required for `"random_walk"`. No default. Start with `5`. | Sets the maximum number of hops in a random path. The value must be at least `2`. LDK Node changes values greater than `19` to `19`. |
+| `interval_secs` | Optional. The default is `10`. | Sets the number of seconds between probe attempts. LDK Node changes `0` to its minimum interval of 100 milliseconds. |
+| `max_locked_msat` | Optional. The default is `100000000` (100,000 satoshis). | Limits the total amount and pending fees of in-flight probes. The service skips a probe that exceeds the remaining limit. Built-in probes use 1,000,000 through 10,000,000 millisatoshis before routing fees. |
+| `diversity_penalty_msat` | Optional. The default is `0`. | Adds a virtual routing cost to recently probed channels. The service does not pay this amount. The cost decreases to zero over 24 hours and encourages different paths. This field only affects `"high_degree"`. |
+| `cooldown_secs` | Optional. The default is `3600`. | Sets the time before `"high_degree"` can select the same destination again. The strategy starts a new cycle immediately after it probes all destinations. |
+
+```toml
+[probing]
+strategy = "high_degree"
+top_node_count = 100
+interval_secs = 30
+max_locked_msat = 100000000
+diversity_penalty_msat = 250
+cooldown_secs = 3600
+```
+
+> [!CAUTION]
+> Probes send real HTLCs over real channels. A probe can lock outbound liquidity
+> until its HTLC expires. Use `max_locked_msat` to limit this risk.
+
 ### `[storage.disk]`
 
 Where persistent data is stored. Defaults to `~/.ldk-server/` on Linux and

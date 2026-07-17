@@ -9,6 +9,23 @@ alias = "ldk_server"                          # Lightning node alias
 #rgs_server_url = "https://rapidsync.lightningdevkit.org/snapshot/v2/"  # Optional: RGS URL for rapid gossip sync
 #async_payments_role = "client"               # Optional async payments role: "client" or "server"
 
+# Background probing service (optional)
+# CAUTION: Probes send real HTLCs and can lock outbound liquidity until they time out.
+# See docs/configuration.md for complete field descriptions.
+# Set only the field required by the selected strategy.
+# "high_degree" requires top_node_count. "random_walk" requires max_hops.
+#[probing]
+#strategy = "high_degree"                     # Required. No default. See the strategy recommendations in the documentation.
+#top_node_count = 100                          # Required for "high_degree". No default. Start with 100.
+# max_hops must be at least 2. LDK Node changes values greater than 19 to 19.
+#max_hops = 5                                  # Required for "random_walk". No default. Start with 5.
+#interval_secs = 10                            # Time between probe attempts (default: 10 seconds)
+# Built-in probes use at least 1000000 msat before routing fees. Lower limits prevent all probes.
+#max_locked_msat = 100000000                   # Maximum total in-flight probe liquidity (default: 100k sats)
+# This virtual scorer cost is not paid. It decreases to zero over 24 hours.
+#diversity_penalty_msat = 250                  # Optional. Only affects "high_degree".
+#cooldown_secs = 3600                          # Node re-probe cooldown for "high_degree" (default: 1 hour)
+
 # Storage settings
 [storage.disk]
 dir_path = "/tmp/ldk-server/"                 # Path for LDK and BDK data persistence, optional, defaults to ~/Library/Application Support/ldk-server/ on macOS, ~/.ldk-server/ on Linux

@@ -207,6 +207,10 @@ fn main() {
 		builder.set_gossip_source_rgs(rgs_server_url);
 	}
 
+	if let Some(probing_config) = config_file.probing_config {
+		builder.set_probing_config(probing_config);
+	}
+
 	if let Err(e) = builder.set_async_payments_role(config_file.async_payments_role) {
 		error!("Failed to configure async payments role: {e}");
 		std::process::exit(-1);
