@@ -443,8 +443,8 @@ fn main() {
 								reason,
 							} => {
 								info!(
-									"CHANNEL_CLOSED: {} from counterparty {:?}",
-									channel_id, counterparty_node_id.map(|p| p.to_string()),
+									"CHANNEL_CLOSED: {} from counterparty {}",
+									channel_id, counterparty_node_id,
 								);
 
 								let channel_id_hex = channel_id.0.to_lower_hex_string();
@@ -456,8 +456,7 @@ fn main() {
 									event_envelope::Event::ChannelStateChanged(events::ChannelStateChanged {
 										channel_id: channel_id_hex,
 										user_channel_id: user_channel_id.0.to_string(),
-										counterparty_node_id: counterparty_node_id
-											.map(|node_id| node_id.to_string()),
+										counterparty_node_id: Some(counterparty_node_id.to_string()),
 										state: if is_open_failure {
 											events::ChannelState::OpenFailed.into()
 										} else {
