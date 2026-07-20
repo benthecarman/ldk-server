@@ -35,9 +35,8 @@ pub(crate) async fn handle_onchain_send_request(
 		(Some(amount_sats), None) => {
 			context.node.onchain_payment().send_to_address(&address, amount_sats, fee_rate)?
 		},
-		// Retain existing api behaviour to not retain reserves on `send_all_to_address`.
 		(None, Some(true)) => {
-			context.node.onchain_payment().send_all_to_address(&address, false, fee_rate)?
+			context.node.onchain_payment().send_all_to_address(&address, true, fee_rate)?
 		},
 		_ => {
 			return Err(LdkServerError::new(

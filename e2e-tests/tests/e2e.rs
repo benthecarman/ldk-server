@@ -23,7 +23,8 @@ use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_client::client::EventStream;
 use ldk_server_client::ldk_server_grpc::api::{
-	Bolt11ReceiveRequest, Bolt12ReceiveRequest, OnchainReceiveRequest, OpenChannelRequest,
+	Bolt11ReceiveRequest, Bolt12ReceiveRequest, GetBalancesRequest, OnchainReceiveRequest,
+	OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event;
 use ldk_server_client::ldk_server_grpc::events::{
@@ -358,6 +359,42 @@ async fn test_cli_onchain_send() {
 
 	let output = run_cli(&server, &["onchain-send", dest_addr, "50000sat"]);
 	assert!(!output["txid"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_cli_onchain_send_all() {
+	let bitcoind = TestBitcoind::new();
+	let server = LdkServerHandle::start(&bitcoind).await;
+
+	let funding_address =
+		server.client().onchain_receive(OnchainReceiveRequest {}).await.unwrap().address;
+	bitcoind.fund_address(&funding_address, 1.0);
+	mine_and_sync(&bitcoind, &[&server], 6).await;
+	wait_for_onchain_balance(server.client(), Duration::from_secs(30)).await;
+
+	let balances_before = server.client().get_balances(GetBalancesRequest {}).await.unwrap();
+
+	let address = bitcoind.bitcoind.client.new_address().unwrap().to_string();
+	let output = run_cli(&server, &["onchain-send", &address, "--send-all", "true"]);
+	assert!(!output["txid"].as_str().unwrap().is_empty());
+
+	mine_and_sync(&bitcoind, &[&server], 6).await;
+
+	let timeout = Duration::from_secs(30);
+	let start = std::time::Instant::now();
+	let balances = loop {
+		let balances = server.client().get_balances(GetBalancesRequest {}).await.unwrap();
+		if balances.total_onchain_balance_sats != balances_before.total_onchain_balance_sats {
+			break balances;
+		}
+		if start.elapsed() > timeout {
+			panic!("Timed out waiting for on-chain balance to change");
+		}
+		tokio::time::sleep(Duration::from_millis(500)).await;
+	};
+
+	assert_eq!(balances.spendable_onchain_balance_sats, 0);
+	assert_eq!(balances.total_onchain_balance_sats, 0);
 }
 
 #[tokio::test]

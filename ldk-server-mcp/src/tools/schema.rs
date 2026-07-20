@@ -168,7 +168,7 @@ pub fn onchain_send_schema() -> Value {
 			},
 			"send_all": {
 				"type": "boolean",
-				"description": "If true, send full balance (ignores amount_sats). Warning: will not retain on-chain reserves for anchor channels"
+				"description": "If true, send all available balance while retaining on-chain reserves for anchor channels (amount_sats must be unset)"
 			},
 			"fee_rate_sat_per_vb": {
 				"type": "integer",
