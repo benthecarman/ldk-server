@@ -125,11 +125,9 @@ pub struct OnchainSendRequest {
 	#[prost(uint64, optional, tag = "2")]
 	pub amount_sats: ::core::option::Option<u64>,
 	/// If set, the amount_sats field should be unset.
-	/// It indicates that node will send full balance to the specified address.
+	/// It indicates that the node will send all available balance to the specified address.
 	///
-	/// Please note that when send_all is used this operation will **not** retain any on-chain reserves,
-	/// which might be potentially dangerous if you have open Anchor channels for which you can't trust
-	/// the counterparty to spend the Anchor output after channel closure.
+	/// Any on-chain reserves needed for Anchor channels will be retained.
 	/// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_all_to_address>
 	#[prost(bool, optional, tag = "3")]
 	pub send_all: ::core::option::Option<bool>,

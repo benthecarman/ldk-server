@@ -118,7 +118,7 @@ enum Commands {
 		amount: Option<Amount>,
 		#[arg(
 			long,
-			help = "Send full balance to the address. Warning: will not retain on-chain reserves for anchor channels"
+			help = "Send all available balance to the address while retaining on-chain reserves for anchor channels"
 		)]
 		send_all: Option<bool>,
 		#[arg(
