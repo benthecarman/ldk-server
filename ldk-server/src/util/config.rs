@@ -485,6 +485,7 @@ impl ConfigBuilder {
 		let lsps2_service_config = None;
 
 		let pathfinding_scores_source_url = match self.pathfinding_scores_source_url {
+			Some(url) if url.is_empty() => None,
 			Some(url) => Some(url),
 			None if network == Network::Bitcoin => {
 				Some(DEFAULT_PATHFINDING_SCORES_SOURCE_URL.to_string())
@@ -968,7 +969,7 @@ pub struct ArgsConfig {
 	#[arg(
 		long,
 		env = "LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL",
-		help = "The external scores source that is merged into the local scoring system to improve routing. Defaults to https://rapidsync.lightningdevkit.org/scoring/scorer.bin on mainnet."
+		help = "The external scores source that is merged into the local scoring system to improve routing. Defaults to https://rapidsync.lightningdevkit.org/scoring/scorer.bin on mainnet. Set to an empty string to disable."
 	)]
 	pathfinding_scores_source_url: Option<String>,
 
@@ -1545,6 +1546,26 @@ mod tests {
 			config.pathfinding_scores_source_url,
 			Some(DEFAULT_PATHFINDING_SCORES_SOURCE_URL.to_string())
 		);
+	}
+
+	#[test]
+	fn test_empty_pathfinding_scores_source_url_disables_source() {
+		let storage_path = std::env::temp_dir();
+		let config_file_name = "test_empty_pathfinding_scores_source_url.toml";
+		let toml_config = DEFAULT_CONFIG.replace(
+			"alias = \"LDK Server\"",
+			"alias = \"LDK Server\"\npathfinding_scores_source_url = \"\"",
+		);
+		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
+
+		let mut args_config = empty_args_config();
+		args_config.config_file =
+			Some(storage_path.join(config_file_name).to_string_lossy().to_string());
+		args_config.node_network = Some(Network::Bitcoin);
+
+		let config = load_config(&args_config).unwrap();
+
+		assert_eq!(config.pathfinding_scores_source_url, None);
 	}
 
 	#[test]
