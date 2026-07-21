@@ -23,6 +23,8 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_GRPC_SERVICE_ADDRESS: &str = "127.0.0.1:3536";
+const DEFAULT_PATHFINDING_SCORES_SOURCE_URL: &str =
+	"https://rapidsync.lightningdevkit.org/scoring/scorer.bin";
 const DEFAULT_LOG_MAX_SIZE_MB: u64 = 50;
 const DEFAULT_LOG_ROTATION_INTERVAL_HOURS: u64 = 24;
 const DEFAULT_LOG_MAX_FILES: usize = 5;
@@ -482,7 +484,13 @@ impl ConfigBuilder {
 		#[cfg(not(feature = "experimental-lsps2-support"))]
 		let lsps2_service_config = None;
 
-		let pathfinding_scores_source_url = self.pathfinding_scores_source_url;
+		let pathfinding_scores_source_url = match self.pathfinding_scores_source_url {
+			Some(url) => Some(url),
+			None if network == Network::Bitcoin => {
+				Some(DEFAULT_PATHFINDING_SCORES_SOURCE_URL.to_string())
+			},
+			None => None,
+		};
 
 		let async_payments_role =
 			self.async_payments_role.as_deref().map(parse_async_payments_role).transpose()?;
@@ -960,7 +968,7 @@ pub struct ArgsConfig {
 	#[arg(
 		long,
 		env = "LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL",
-		help = "The external scores source that is merged into the local scoring system to improve routing."
+		help = "The external scores source that is merged into the local scoring system to improve routing. Defaults to https://rapidsync.lightningdevkit.org/scoring/scorer.bin on mainnet."
 	)]
 	pathfinding_scores_source_url: Option<String>,
 
@@ -1517,6 +1525,26 @@ mod tests {
 
 		fs::write(storage_path.join(config_file_name), toml_config).unwrap();
 		assert!(load_config(&args_config).is_ok());
+	}
+
+	#[test]
+	fn test_mainnet_defaults_pathfinding_scores_source_url() {
+		let storage_path = std::env::temp_dir();
+		let config_file_name = "test_mainnet_pathfinding_scores_source_url.toml";
+
+		fs::write(storage_path.join(config_file_name), DEFAULT_CONFIG).unwrap();
+
+		let mut args_config = empty_args_config();
+		args_config.config_file =
+			Some(storage_path.join(config_file_name).to_string_lossy().to_string());
+		args_config.node_network = Some(Network::Bitcoin);
+
+		let config = load_config(&args_config).unwrap();
+
+		assert_eq!(
+			config.pathfinding_scores_source_url,
+			Some(DEFAULT_PATHFINDING_SCORES_SOURCE_URL.to_string())
+		);
 	}
 
 	#[test]
