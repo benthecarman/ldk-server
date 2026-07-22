@@ -5,7 +5,7 @@ listening_addresses = ["localhost:9735"]      # Lightning node listening address
 #announcement_addresses = ["54.3.7.81:9735"]  # Lightning node announcement addresses
 #grpc_service_address = "127.0.0.1:3536"      # LDK Server gRPC address (optional, defaults to 127.0.0.1:3536)
 alias = "ldk_server"                          # Lightning node alias
-#pathfinding_scores_source_url = ""           # External Pathfinding Scores Source
+#pathfinding_scores_source_url = "https://rapidsync.lightningdevkit.org/scoring/scorer.bin"  # External pathfinding scores source (optional, defaults to this URL on mainnet; set to "" to disable)
 #rgs_server_url = "https://rapidsync.lightningdevkit.org/snapshot/v2/"  # Optional: RGS URL for rapid gossip sync
 #async_payments_role = "client"               # Optional async payments role: "client" or "server"
 
