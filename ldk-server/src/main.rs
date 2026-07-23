@@ -207,6 +207,10 @@ fn main() {
 		builder.set_gossip_source_rgs(rgs_server_url);
 	}
 
+	if let Some(probing_config) = config_file.probing_config {
+		builder.set_probing_config(probing_config);
+	}
+
 	if let Err(e) = builder.set_async_payments_role(config_file.async_payments_role) {
 		error!("Failed to configure async payments role: {e}");
 		std::process::exit(-1);
@@ -443,8 +447,8 @@ fn main() {
 								reason,
 							} => {
 								info!(
-									"CHANNEL_CLOSED: {} from counterparty {:?}",
-									channel_id, counterparty_node_id.map(|p| p.to_string()),
+									"CHANNEL_CLOSED: {} from counterparty {}",
+									channel_id, counterparty_node_id,
 								);
 
 								let channel_id_hex = channel_id.0.to_lower_hex_string();
@@ -456,8 +460,7 @@ fn main() {
 									event_envelope::Event::ChannelStateChanged(events::ChannelStateChanged {
 										channel_id: channel_id_hex,
 										user_channel_id: user_channel_id.0.to_string(),
-										counterparty_node_id: counterparty_node_id
-											.map(|node_id| node_id.to_string()),
+										counterparty_node_id: Some(counterparty_node_id.to_string()),
 										state: if is_open_failure {
 											events::ChannelState::OpenFailed.into()
 										} else {

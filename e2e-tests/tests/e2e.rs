@@ -1237,12 +1237,12 @@ async fn test_forwarded_payment_event() {
 
 	let mut builder_c = ldk_node::Builder::from_config(config_c);
 	let (rpc_host, rpc_port, rpc_user, rpc_password) = bitcoind.rpc_details();
-	builder_c.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+	builder_c.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password, None);
 
 	// Set B as LSPS2 LSP for C
 	let b_node_id = ldk_node::bitcoin::secp256k1::PublicKey::from_str(server_b.node_id()).unwrap();
 	let b_addr = SocketAddress::from_str(&format!("127.0.0.1:{}", server_b.p2p_port)).unwrap();
-	builder_c.set_liquidity_source_lsps2(b_node_id, b_addr, None);
+	builder_c.add_liquidity_source(b_node_id, b_addr, None, true);
 
 	let mnemonic_c = ldk_node::entropy::generate_entropy_mnemonic(None);
 	let node_entropy_c = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic_c, None);

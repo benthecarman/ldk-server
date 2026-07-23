@@ -10,6 +10,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 use std::{fs, io};
 
 use clap::Parser;
@@ -19,6 +20,7 @@ use ldk_node::config::{AsyncPaymentsRole, HRNResolverConfig, HumanReadableNamesC
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::liquidity::LSPS2ServiceConfig;
+use ldk_node::probing::{ProbingConfig, ProbingConfigBuilder};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +68,7 @@ pub struct Config {
 	pub log_max_files: usize,
 	pub log_to_file: bool,
 	pub pathfinding_scores_source_url: Option<String>,
+	pub probing_config: Option<ProbingConfig>,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
 	pub metrics_enabled: bool,
 	pub poll_metrics_interval: Option<u64>,
@@ -139,6 +142,7 @@ struct ConfigBuilder {
 	log_max_files: Option<usize>,
 	log_to_file: Option<bool>,
 	pathfinding_scores_source_url: Option<String>,
+	probing: Option<ProbingTomlConfig>,
 	async_payments_role: Option<String>,
 	metrics_enabled: Option<bool>,
 	poll_metrics_interval: Option<u64>,
@@ -216,6 +220,10 @@ impl ConfigBuilder {
 			self.metrics_password = metrics.password.or(self.metrics_password.clone());
 		}
 
+		if let Some(probing) = toml.probing {
+			self.probing = Some(probing);
+		}
+
 		if let Some(tor) = toml.tor {
 			self.tor_proxy_address = Some(tor.proxy_address)
 		}
@@ -276,6 +284,36 @@ impl ConfigBuilder {
 
 		if let Some(async_payments_role) = &args.node_async_payments_role {
 			self.async_payments_role = Some(async_payments_role.clone());
+		}
+
+		if args.has_probing_options() {
+			let probing = self.probing.get_or_insert_with(ProbingTomlConfig::default);
+			if let Some(probing_strategy) = &args.probing_strategy {
+				probing.strategy = Some(probing_strategy.clone());
+				match probing_strategy.trim().to_ascii_lowercase().as_str() {
+					"high_degree" | "high-degree" => probing.max_hops = None,
+					"random_walk" | "random-walk" => probing.top_node_count = None,
+					_ => {},
+				}
+			}
+			if let Some(top_node_count) = args.probing_top_node_count {
+				probing.top_node_count = Some(top_node_count);
+			}
+			if let Some(max_hops) = args.probing_max_hops {
+				probing.max_hops = Some(max_hops);
+			}
+			if let Some(interval_secs) = args.probing_interval_secs {
+				probing.interval_secs = Some(interval_secs);
+			}
+			if let Some(max_locked_msat) = args.probing_max_locked_msat {
+				probing.max_locked_msat = Some(max_locked_msat);
+			}
+			if let Some(diversity_penalty_msat) = args.probing_diversity_penalty_msat {
+				probing.diversity_penalty_msat = Some(diversity_penalty_msat);
+			}
+			if let Some(cooldown_secs) = args.probing_cooldown_secs {
+				probing.cooldown_secs = Some(cooldown_secs);
+			}
 		}
 
 		if args.metrics_enabled {
@@ -493,6 +531,8 @@ impl ConfigBuilder {
 			None => None,
 		};
 
+		let probing_config = build_probing_config(self.probing)?;
+
 		let async_payments_role =
 			self.async_payments_role.as_deref().map(parse_async_payments_role).transpose()?;
 
@@ -553,6 +593,7 @@ impl ConfigBuilder {
 			log_max_files,
 			log_to_file,
 			pathfinding_scores_source_url,
+			probing_config,
 			async_payments_role,
 			metrics_enabled,
 			poll_metrics_interval,
@@ -577,6 +618,7 @@ pub struct TomlConfig {
 	log: Option<LogConfig>,
 	tls: Option<TomlTlsConfig>,
 	metrics: Option<MetricsTomlConfig>,
+	probing: Option<ProbingTomlConfig>,
 	tor: Option<TomlTorConfig>,
 	hrn: Option<HrnTomlConfig>,
 }
@@ -652,6 +694,18 @@ struct MetricsTomlConfig {
 	poll_metrics_interval: Option<u64>,
 	username: Option<String>,
 	password: Option<String>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProbingTomlConfig {
+	strategy: Option<String>,
+	top_node_count: Option<usize>,
+	max_hops: Option<usize>,
+	interval_secs: Option<u64>,
+	max_locked_msat: Option<u64>,
+	diversity_penalty_msat: Option<u64>,
+	cooldown_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -764,6 +818,82 @@ fn parse_async_payments_role(role: &str) -> io::Result<AsyncPaymentsRole> {
 			),
 		)),
 	}
+}
+
+fn build_probing_config(config: Option<ProbingTomlConfig>) -> io::Result<Option<ProbingConfig>> {
+	let Some(config) = config else {
+		return Ok(None);
+	};
+	let ProbingTomlConfig {
+		strategy,
+		top_node_count,
+		max_hops,
+		interval_secs,
+		max_locked_msat,
+		diversity_penalty_msat,
+		cooldown_secs,
+	} = config;
+
+	let strategy = strategy.ok_or_else(|| missing_field_err("probing.strategy"))?;
+	let mut builder = match strategy.trim().to_ascii_lowercase().as_str() {
+		"high_degree" | "high-degree" => {
+			if max_hops.is_some() {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"`probing.max_hops` only applies to the `random_walk` strategy",
+				));
+			}
+			let top_node_count =
+				top_node_count.ok_or_else(|| missing_field_err("probing.top_node_count"))?;
+			if top_node_count == 0 {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"`probing.top_node_count` must be greater than 0",
+				));
+			}
+			ProbingConfigBuilder::high_degree(top_node_count)
+		},
+		"random_walk" | "random-walk" => {
+			if top_node_count.is_some() {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"`probing.top_node_count` only applies to the `high_degree` strategy",
+				));
+			}
+			let max_hops = max_hops.ok_or_else(|| missing_field_err("probing.max_hops"))?;
+			if max_hops < 2 {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"`probing.max_hops` must be at least 2",
+				));
+			}
+			ProbingConfigBuilder::random_walk(max_hops)
+		},
+		other => {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!(
+					"Invalid probing strategy '{}' configured; expected 'high_degree' or 'random_walk'",
+					other
+				),
+			))
+		},
+	};
+
+	if let Some(interval_secs) = interval_secs {
+		builder.interval(Duration::from_secs(interval_secs));
+	}
+	if let Some(max_locked_msat) = max_locked_msat {
+		builder.max_locked_msat(max_locked_msat);
+	}
+	if let Some(diversity_penalty_msat) = diversity_penalty_msat {
+		builder.diversity_penalty_msat(diversity_penalty_msat);
+	}
+	if let Some(cooldown_secs) = cooldown_secs {
+		builder.cooldown(Duration::from_secs(cooldown_secs));
+	}
+
+	Ok(Some(builder.build()))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -982,6 +1112,55 @@ pub struct ArgsConfig {
 
 	#[arg(
 		long,
+		env = "LDK_SERVER_PROBING_STRATEGY",
+		help = "Enable background probing with `high_degree` or `random_walk`."
+	)]
+	probing_strategy: Option<String>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_TOP_NODE_COUNT",
+		help = "Number of highly connected nodes to cycle through with the `high_degree` probing strategy."
+	)]
+	probing_top_node_count: Option<usize>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_MAX_HOPS",
+		help = "Maximum path length for the `random_walk` probing strategy."
+	)]
+	probing_max_hops: Option<usize>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_INTERVAL_SECS",
+		help = "Interval between background probe attempts in seconds."
+	)]
+	probing_interval_secs: Option<u64>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_MAX_LOCKED_MSAT",
+		help = "Maximum total millisatoshis that background probes may lock in flight."
+	)]
+	probing_max_locked_msat: Option<u64>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_DIVERSITY_PENALTY_MSAT",
+		help = "Scoring penalty for recently probed channels. Useful with `high_degree`."
+	)]
+	probing_diversity_penalty_msat: Option<u64>,
+
+	#[arg(
+		long,
+		env = "LDK_SERVER_PROBING_COOLDOWN_SECS",
+		help = "Time before a node can be probed again. Applies to `high_degree`."
+	)]
+	probing_cooldown_secs: Option<u64>,
+
+	#[arg(
+		long,
 		env = "LDK_SERVER_METRICS_ENABLED",
 		help = "The option to enable the metrics endpoint. WARNING: This endpoint is unauthenticated."
 	)]
@@ -1015,6 +1194,18 @@ pub struct ArgsConfig {
 		help = "Tor daemon SOCKS proxy address. Only connections to OnionV3 peers will be made via this proxy; other connections (IPv4 peers, Electrum server) will not be routed over Tor."
 	)]
 	tor_proxy_address: Option<String>,
+}
+
+impl ArgsConfig {
+	fn has_probing_options(&self) -> bool {
+		self.probing_strategy.is_some()
+			|| self.probing_top_node_count.is_some()
+			|| self.probing_max_hops.is_some()
+			|| self.probing_interval_secs.is_some()
+			|| self.probing_max_locked_msat.is_some()
+			|| self.probing_diversity_penalty_msat.is_some()
+			|| self.probing_cooldown_secs.is_some()
+	}
 }
 
 pub fn load_config(args: &ArgsConfig) -> io::Result<Config> {
@@ -1157,6 +1348,13 @@ mod tests {
 			node_alias: Some(String::from("LDK Server CLI")),
 			pathfinding_scores_source_url: Some(String::from("https://example.com/")),
 			node_async_payments_role: Some(String::from("server")),
+			probing_strategy: None,
+			probing_top_node_count: None,
+			probing_max_hops: None,
+			probing_interval_secs: None,
+			probing_max_locked_msat: None,
+			probing_diversity_penalty_msat: None,
+			probing_cooldown_secs: None,
 			metrics_enabled: false,
 			poll_metrics_interval: None,
 			metrics_username: None,
@@ -1185,6 +1383,13 @@ mod tests {
 			storage_dir_path: None,
 			pathfinding_scores_source_url: None,
 			node_async_payments_role: None,
+			probing_strategy: None,
+			probing_top_node_count: None,
+			probing_max_hops: None,
+			probing_interval_secs: None,
+			probing_max_locked_msat: None,
+			probing_diversity_penalty_msat: None,
+			probing_cooldown_secs: None,
 			metrics_enabled: false,
 			poll_metrics_interval: None,
 			metrics_username: None,
@@ -1290,6 +1495,7 @@ mod tests {
 			log_max_files: 5,
 			log_to_file: true,
 			pathfinding_scores_source_url: None,
+			probing_config: None,
 			async_payments_role: Some(AsyncPaymentsRole::Client),
 			metrics_enabled: false,
 			poll_metrics_interval: None,
@@ -1731,6 +1937,7 @@ mod tests {
 			log_level: LevelFilter::Trace,
 			log_file_path: Some("/var/log/ldk-server.log".to_string()),
 			pathfinding_scores_source_url: Some("https://example.com/".to_string()),
+			probing_config: None,
 			async_payments_role: Some(AsyncPaymentsRole::Server),
 			metrics_enabled: false,
 			poll_metrics_interval: None,
@@ -1850,6 +2057,7 @@ mod tests {
 			log_level: LevelFilter::Trace,
 			log_file_path: Some("/var/log/ldk-server.log".to_string()),
 			pathfinding_scores_source_url: Some("https://example.com/".to_string()),
+			probing_config: None,
 			async_payments_role: Some(AsyncPaymentsRole::Server),
 			metrics_enabled: false,
 			poll_metrics_interval: None,
@@ -2134,6 +2342,179 @@ mod tests {
 			SocketAddress::from_str("[2001:db8::1]:53").unwrap()
 		);
 		assert!(parse_dns_server_address("invalid@address").is_err());
+	}
+
+	#[test]
+	fn test_probing_config_from_file() {
+		let storage_path = std::env::temp_dir();
+		let config_file_name = "test_probing_config.toml";
+		let mut args_config = empty_args_config();
+		args_config.config_file =
+			Some(storage_path.join(config_file_name).to_string_lossy().to_string());
+
+		let high_degree_config = format!(
+			r#"
+			[node]
+			network = "regtest"
+
+			[bitcoind]
+			rpc_address = "127.0.0.1:8332"
+			rpc_user = "user"
+			rpc_password = "password"
+
+			[probing]
+			strategy = "high_degree"
+			top_node_count = 100
+			interval_secs = 30
+			max_locked_msat = 500000
+			diversity_penalty_msat = 250
+			cooldown_secs = 1800
+			{}"#,
+			lsps2_service_config_for_feature()
+		);
+		fs::write(storage_path.join(config_file_name), high_degree_config).unwrap();
+		assert!(load_config(&args_config).unwrap().probing_config.is_some());
+
+		let random_walk_config = format!(
+			r#"
+			[node]
+			network = "regtest"
+
+			[bitcoind]
+			rpc_address = "127.0.0.1:8332"
+			rpc_user = "user"
+			rpc_password = "password"
+
+			[probing]
+			strategy = "random_walk"
+			max_hops = 5
+			{}"#,
+			lsps2_service_config_for_feature()
+		);
+		fs::write(storage_path.join(config_file_name), random_walk_config).unwrap();
+		assert!(load_config(&args_config).unwrap().probing_config.is_some());
+	}
+
+	#[test]
+	fn test_probing_config_validation() {
+		let high_degree = ProbingTomlConfig {
+			strategy: Some("high_degree".to_string()),
+			top_node_count: Some(100),
+			interval_secs: Some(30),
+			max_locked_msat: Some(500_000),
+			diversity_penalty_msat: Some(250),
+			cooldown_secs: Some(1800),
+			..ProbingTomlConfig::default()
+		};
+		assert!(build_probing_config(Some(high_degree)).unwrap().is_some());
+
+		let random_walk = ProbingTomlConfig {
+			strategy: Some("random_walk".to_string()),
+			max_hops: Some(5),
+			..ProbingTomlConfig::default()
+		};
+		assert!(build_probing_config(Some(random_walk)).unwrap().is_some());
+
+		let missing_strategy = build_probing_config(Some(ProbingTomlConfig {
+			top_node_count: Some(100),
+			..ProbingTomlConfig::default()
+		}))
+		.unwrap_err();
+		assert!(missing_strategy.to_string().contains("probing.strategy"));
+
+		let missing_strategy_option = build_probing_config(Some(ProbingTomlConfig {
+			strategy: Some("high_degree".to_string()),
+			..ProbingTomlConfig::default()
+		}))
+		.unwrap_err();
+		assert!(missing_strategy_option.to_string().contains("probing.top_node_count"));
+
+		let mismatched_option = build_probing_config(Some(ProbingTomlConfig {
+			strategy: Some("random_walk".to_string()),
+			top_node_count: Some(100),
+			max_hops: Some(5),
+			..ProbingTomlConfig::default()
+		}))
+		.unwrap_err();
+		assert!(mismatched_option.to_string().contains("probing.top_node_count"));
+
+		let invalid_strategy = build_probing_config(Some(ProbingTomlConfig {
+			strategy: Some("invalid".to_string()),
+			..ProbingTomlConfig::default()
+		}))
+		.unwrap_err();
+		assert!(invalid_strategy.to_string().contains("Invalid probing strategy"));
+
+		for max_hops in [0, 1] {
+			let invalid_max_hops = build_probing_config(Some(ProbingTomlConfig {
+				strategy: Some("random_walk".to_string()),
+				max_hops: Some(max_hops),
+				..ProbingTomlConfig::default()
+			}))
+			.unwrap_err();
+			assert!(invalid_max_hops.to_string().contains("`probing.max_hops` must be at least 2"));
+		}
+
+		let clamped_max_hops = ProbingTomlConfig {
+			strategy: Some("random_walk".to_string()),
+			max_hops: Some(20),
+			..ProbingTomlConfig::default()
+		};
+		assert!(build_probing_config(Some(clamped_max_hops)).unwrap().is_some());
+	}
+
+	#[test]
+	fn test_accepts_probing_args() {
+		let args_config = ArgsConfig::try_parse_from([
+			"ldk-server",
+			"--probing-strategy",
+			"high_degree",
+			"--probing-top-node-count",
+			"100",
+			"--probing-interval-secs",
+			"30",
+			"--probing-max-locked-msat",
+			"500000",
+			"--probing-diversity-penalty-msat",
+			"250",
+			"--probing-cooldown-secs",
+			"1800",
+		])
+		.unwrap();
+
+		assert_eq!(args_config.probing_strategy.as_deref(), Some("high_degree"));
+		assert_eq!(args_config.probing_top_node_count, Some(100));
+		assert_eq!(args_config.probing_interval_secs, Some(30));
+		assert_eq!(args_config.probing_max_locked_msat, Some(500_000));
+		assert_eq!(args_config.probing_diversity_penalty_msat, Some(250));
+		assert_eq!(args_config.probing_cooldown_secs, Some(1800));
+	}
+
+	#[test]
+	fn test_probing_args_override_strategy_specific_file_options() {
+		let mut builder = ConfigBuilder {
+			probing: Some(ProbingTomlConfig {
+				strategy: Some("high_degree".to_string()),
+				top_node_count: Some(100),
+				..ProbingTomlConfig::default()
+			}),
+			..ConfigBuilder::default()
+		};
+		let args_config = ArgsConfig::try_parse_from([
+			"ldk-server",
+			"--probing-strategy",
+			"random_walk",
+			"--probing-max-hops",
+			"5",
+		])
+		.unwrap();
+
+		builder.merge_args(&args_config);
+
+		let probing = builder.probing.unwrap();
+		assert_eq!(probing.strategy.as_deref(), Some("random_walk"));
+		assert_eq!(probing.top_node_count, None);
+		assert_eq!(probing.max_hops, Some(5));
 	}
 
 	#[test]

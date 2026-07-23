@@ -129,6 +129,7 @@ impl From<NodeError> for LdkServerError {
 			| NodeError::LnurlAuthFailed
 			| NodeError::LnurlAuthTimeout
 			| NodeError::InvalidLnurl
+			| NodeError::ChainSourceNotSupported
 			| NodeError::TxSyncTimeout => (error.to_string(), LdkServerErrorCode::InternalServerError),
 		};
 		LdkServerError::new(error_code, message)
