@@ -147,11 +147,14 @@ pub struct ChannelStateChanged {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentReceived {
+	/// The local identifier used to track the payment, in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 	/// The payment details for the payment in event.
-	#[prost(message, optional, tag = "1")]
+	#[prost(message, optional, tag = "2")]
 	pub payment: ::core::option::Option<super::types::Payment>,
 	/// Custom TLV records attached to the incoming payment, if any.
-	#[prost(message, repeated, tag = "2")]
+	#[prost(message, repeated, tag = "3")]
 	pub custom_records: ::prost::alloc::vec::Vec<super::types::CustomTlvRecord>,
 }
 /// PaymentSuccessful indicates a sent payment was successful.
@@ -161,8 +164,11 @@ pub struct PaymentReceived {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentSuccessful {
+	/// The local identifier used to track the payment, in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 	/// The payment details for the payment in event.
-	#[prost(message, optional, tag = "1")]
+	#[prost(message, optional, tag = "2")]
 	pub payment: ::core::option::Option<super::types::Payment>,
 }
 /// PaymentFailed indicates a sent payment has failed.
@@ -172,15 +178,18 @@ pub struct PaymentSuccessful {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentFailed {
+	/// The local identifier used to track the payment, in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 	/// The payment details for the payment in event.
-	#[prost(message, optional, tag = "1")]
+	#[prost(message, optional, tag = "2")]
 	pub payment: ::core::option::Option<super::types::Payment>,
 	/// The reason the payment failed, if known.
 	///
 	/// This is only available on the emitted event; `GetPaymentDetails` cannot
 	/// recover it as LDK Node does not currently persist the failure reason in
 	/// `PaymentDetails`.
-	#[prost(enumeration = "PaymentFailureReason", optional, tag = "2")]
+	#[prost(enumeration = "PaymentFailureReason", optional, tag = "3")]
 	pub reason: ::core::option::Option<i32>,
 }
 /// PaymentClaimable indicates a payment has arrived and is waiting to be manually claimed or failed.
@@ -191,14 +200,17 @@ pub struct PaymentFailed {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PaymentClaimable {
+	/// The local identifier used to track the payment, in hex-encoded form.
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
 	/// The payment details for the claimable payment.
-	#[prost(message, optional, tag = "1")]
+	#[prost(message, optional, tag = "2")]
 	pub payment: ::core::option::Option<super::types::Payment>,
 	/// Custom TLV records attached to the claimable payment, if any.
-	#[prost(message, repeated, tag = "2")]
+	#[prost(message, repeated, tag = "3")]
 	pub custom_records: ::prost::alloc::vec::Vec<super::types::CustomTlvRecord>,
 	/// The block height by which this payment must be claimed before it is failed back.
-	#[prost(uint32, optional, tag = "3")]
+	#[prost(uint32, optional, tag = "4")]
 	pub claim_deadline: ::core::option::Option<u32>,
 }
 /// PaymentForwarded indicates a payment was forwarded through the node.
