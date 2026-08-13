@@ -128,12 +128,13 @@ when the invoice is paid.
 
 ### BOLT12 Offers and Refunds
 
-| RPC                   | Description                                                             |
-|-----------------------|-------------------------------------------------------------------------|
-| `Bolt12Receive`       | Create a BOLT12 offer (fixed or variable amount)                        |
-| `Bolt12Send`          | Pay a BOLT12 offer (with optional quantity, payer note, routing config) |
-| `Bolt12SendRefund`    | Create a BOLT12 refund that this node will pay                          |
-| `Bolt12ReceiveRefund` | Request an incoming payment for a BOLT12 refund                         |
+| RPC                      | Description                                                             |
+|--------------------------|-------------------------------------------------------------------------|
+| `Bolt12Receive`          | Create a BOLT12 offer (fixed or variable amount)                        |
+| `Bolt12Send`             | Pay a BOLT12 offer (with optional quantity, payer note, routing config) |
+| `Bolt12SendRefund`       | Create a BOLT12 refund that this node will pay                          |
+| `Bolt12ReceiveRefund`    | Request an incoming payment for a BOLT12 refund                         |
+| `Bolt12CreatePayerProof` | Create a BOLT 12 payer proof from a successful payment                  |
 
 ### Spontaneous and Unified Send
 
