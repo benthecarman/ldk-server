@@ -232,23 +232,29 @@ optional Basic Auth. See [Configuration](configuration.md#metrics) for setup.
 
 Hodl invoices allow you to inspect and conditionally accept incoming payments:
 
-1. **Create the invoice:** Call `Bolt11ReceiveForHash` with a payment hash you control.
-2. **Wait for payment:** Subscribe via `SubscribeEvents`. Save the payment ID from the matching
-   `PaymentClaimable` event.
-3. **Decide:**
-    - **Accept:** Call `Bolt11ClaimForId` with the payment ID and corresponding preimage.
-    - **Reject:** Call `Bolt11FailForId` with the payment ID.
+1. **Subscribe:** Call `SubscribeEvents` before you create or share the invoice. Events are not
+   replayed.
+2. **Create the invoice:** Generate a new payment hash. Call `Bolt11ReceiveForHash` with this hash.
+   Never reuse a payment hash. Reuse is unsafe and can cause loss of funds.
+3. **Handle each payment:** Save the payment ID from each `PaymentClaimable` event. A payer can pay
+   the same invoice more than once. Each payment has a separate event and payment ID.
+4. **Decide before `claim_deadline`:**
+    - **Accept an expected payment:** Call `Bolt11ClaimForId` with its payment ID and preimage.
+    - **Reject an unexpected payment:** Call `Bolt11FailForId` with its payment ID. Reject duplicate
+      and late payments instead of ignoring or claiming them.
 
 The payment is held in a pending state until you explicitly claim or fail it. **You must
-always call one of these.** If you do neither, the HTLC will eventually time out, which
-can cause a force-closure of the channel.
+always handle each event.** If you do not, the HTLC will eventually time out. This can cause a
+force-closure of the channel.
 
 ## Pagination
 
 `ListPayments` and `ListForwardedPayments` support cursor-based pagination:
 
-1. Make the first request with your desired `number_of_payments` page size.
+1. Make the first request without a `page_token`. The server controls the page size.
 2. If the response includes a `next_page_token`, pass it as `page_token` in the next request.
 3. When `next_page_token` is absent, you have reached the end of the results.
 
 Results are ordered by creation time (most recent first).
+
+The CLI `--number-of-payments` option combines multiple pages. It does not set the gRPC page size.

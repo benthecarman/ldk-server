@@ -172,6 +172,7 @@ message Bolt11ReceiveForHashRequest {
   uint32 expiry_secs = 3;
 
   // The hex-encoded 32-byte payment hash to use for the invoice.
+  // Use a new payment hash for each invoice. Reuse is unsafe and can cause loss of funds.
   string payment_hash = 4;
 }
 

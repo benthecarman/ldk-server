@@ -220,6 +220,7 @@ pub struct Bolt11ReceiveForHashRequest {
 	#[prost(uint32, tag = "3")]
 	pub expiry_secs: u32,
 	/// The hex-encoded 32-byte payment hash to use for the invoice.
+	/// Use a new payment hash for each invoice. Reuse is unsafe and can cause loss of funds.
 	#[prost(string, tag = "4")]
 	pub payment_hash: ::prost::alloc::string::String,
 }

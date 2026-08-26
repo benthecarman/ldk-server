@@ -330,7 +330,8 @@ fn main() {
 		let metrics: Option<Arc<Metrics>> = if config_file.metrics_enabled {
 			let poll_metrics_interval = Duration::from_secs(config_file.poll_metrics_interval.unwrap_or(60));
 			let metrics_node = Arc::clone(&node);
-			let mut interval = tokio::time::interval(poll_metrics_interval);
+			let first_poll = tokio::time::Instant::now() + poll_metrics_interval;
+			let mut interval = tokio::time::interval_at(first_poll, poll_metrics_interval);
 			let metrics = Arc::new(Metrics::new());
 			let metrics_bg = Arc::clone(&metrics);
 
