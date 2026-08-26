@@ -228,6 +228,17 @@ GET /metrics
 Returns Prometheus-format text. Requires `[metrics] enabled = true` in the config. Supports
 optional Basic Auth. See [Configuration](configuration.md#metrics) for setup.
 
+## BOLT 12 Payer-Proof Lifecycle
+
+Subscribe with `SubscribeEvents` before you send a BOLT 12 payment. Events are not replayed.
+
+When `PaymentSuccessful` arrives, retain its `payment_id`, `payment_preimage`, and
+`bolt12_invoice`. Pass these values to `Bolt12CreatePayerProof`. The request can also select the
+optional invoice fields that the proof discloses.
+
+The `bolt12_invoice` field is absent for static-invoice payments. These asynchronous payments
+cannot produce payer proofs.
+
 ## Hodl Invoice Lifecycle
 
 Hodl invoices allow you to inspect and conditionally accept incoming payments:
