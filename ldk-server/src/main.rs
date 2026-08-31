@@ -726,8 +726,18 @@ fn send_payment_event(
 				error!("Failed to mark event as handled: {e}");
 			}
 		},
-		Ok(None) => error!("Unable to find payment with payment ID: {payment_id}"),
-		Err(e) => error!("Failed to retrieve payment with payment ID {payment_id}: {e}"),
+		Ok(None) => {
+			error!("Unable to find payment with payment ID: {payment_id}");
+			if let Err(e) = event_node.event_handled() {
+				error!("Failed to mark event as handled: {e}");
+			}
+		},
+		Err(e) => {
+			error!("Failed to retrieve payment with payment ID {payment_id}: {e}");
+			if let Err(e) = event_node.event_handled() {
+				error!("Failed to mark event as handled: {e}");
+			}
+		},
 	}
 }
 
