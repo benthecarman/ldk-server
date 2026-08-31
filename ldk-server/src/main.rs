@@ -335,8 +335,8 @@ fn main() {
 			let metrics = Arc::new(Metrics::new());
 			let metrics_bg = Arc::clone(&metrics);
 
-			// Initialize metrics that are event-driven to ensure they start with correct values from persistence
-			metrics.initialize_payment_metrics(&metrics_node);
+			// Initialize metrics before the first delayed poll.
+			metrics.initialize_metrics(&metrics_node);
 
 			runtime.spawn(async move {
 				loop {

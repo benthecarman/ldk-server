@@ -114,15 +114,26 @@ impl Metrics {
 		}
 	}
 
-	pub fn initialize_payment_metrics(&self, node: &Node) {
+	pub fn initialize_metrics(&self, node: &Node) {
 		match payment_status_counts(node) {
 			Ok(counts) => self.store_payment_counts(counts),
 			Err(e) => error!("Failed to initialize payment metrics: {e}"),
 		}
 
-		let channels_count = node.list_channels().len() as i64;
-		self.total_channels_count.store(channels_count, Ordering::Relaxed);
+		let all_channels = node.list_channels();
+		self.total_channels_count.store(all_channels.len() as i64, Ordering::Relaxed);
 
+		let public_channels_count =
+			all_channels.iter().filter(|channel_details| channel_details.is_announced).count()
+				as i64;
+		self.total_public_channels_count.store(public_channels_count, Ordering::Relaxed);
+
+		let private_channels_count =
+			all_channels.iter().filter(|channel_details| !channel_details.is_announced).count()
+				as i64;
+		self.total_private_channels_count.store(private_channels_count, Ordering::Relaxed);
+
+		self.update_peer_count(node);
 		self.update_all_balances(node);
 	}
 
