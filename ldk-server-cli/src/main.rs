@@ -1442,17 +1442,16 @@ fn parse_bolt11_invoice_description(
 }
 
 fn parse_page_token(token_str: &str) -> Result<PageToken, LdkServerError> {
-	let parts: Vec<&str> = token_str.split(':').collect();
-	if parts.len() != 2 {
-		return Err(LdkServerError::new(
+	let (token, index) = token_str.rsplit_once(':').ok_or_else(|| {
+		LdkServerError::new(
 			InvalidRequestError,
 			"Page token must be in format 'token:index'".to_string(),
-		));
-	}
-	let index = parts[1].parse::<i64>().map_err(|_| {
+		)
+	})?;
+	let index = index.parse::<i64>().map_err(|_| {
 		LdkServerError::new(InvalidRequestError, "Invalid page token index".to_string())
 	})?;
-	Ok(PageToken { token: parts[0].to_string(), index })
+	Ok(PageToken { token: token.to_string(), index })
 }
 
 fn parse_custom_tlv(s: &str) -> Result<(u64, Vec<u8>), String> {
@@ -1488,6 +1487,40 @@ fn handle_error(e: LdkServerError) -> ! {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn fetch_paginated_collects_multiple_pages() {
+		let response = fetch_paginated(
+			Some(3),
+			None,
+			|page_token| async move {
+				match page_token {
+					None => Ok::<_, LdkServerError>((
+						vec![1, 2],
+						Some(PageToken { token: "store:v2:cursor".to_string(), index: 7 }),
+					)),
+					Some(token) => {
+						assert_eq!(token.token, "store:v2:cursor");
+						assert_eq!(token.index, 7);
+						Ok((vec![3], None))
+					},
+				}
+			},
+			|response| response,
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(response.list, vec![1, 2, 3]);
+		assert!(response.next_page_token.is_none());
+	}
+
+	#[test]
+	fn parse_page_token_accepts_colons_in_token() {
+		let token = parse_page_token("store:v2:cursor:7").unwrap();
+		assert_eq!(token.token, "store:v2:cursor");
+		assert_eq!(token.index, 7);
+	}
 
 	#[test]
 	fn parse_custom_tlv_accepts_valid_record() {
