@@ -538,7 +538,6 @@ fn main() {
 								&event_sender);
 
 							if let Some(metrics) = &metrics {
-								metrics.update_payments_count(true);
 								metrics.update_all_balances(&event_node);
 							}
 						},
@@ -553,9 +552,6 @@ fn main() {
 								&event_node,
 								&event_sender);
 
-							if let Some(metrics) = &metrics {
-								metrics.update_payments_count(false);
-							}
 						},
 						Event::PaymentClaimable { payment_id, custom_records, claim_deadline, .. } => {
 							send_payment_event(
