@@ -40,7 +40,7 @@ pub fn resolve_config(config_path: Option<String>) -> Result<ResolvedConfig, Str
 	let base_url = resolve_base_url(env_base_url, config.as_ref());
 
 	let api_key = resolve_api_key(env_api_key, config.as_ref()).ok_or_else(
-		|| "API key not provided. Set LDK_API_KEY or ensure the api_key file exists at ~/.ldk-server/[network]/api_key".to_string()
+		|| "API key not provided. Set LDK_API_KEY or ensure the admin key exists at ~/.ldk-server/[network]/api_keys/admin.toml".to_string()
 	)?;
 
 	let tls_cert_path = resolve_cert_path(env_tls_cert_path, config.as_ref()).ok_or_else(|| {

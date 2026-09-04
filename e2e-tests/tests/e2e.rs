@@ -22,9 +22,10 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::lightning::offers::refund::Refund;
 use ldk_node::lightning_invoice::Bolt11Invoice;
+use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::ldk_server_grpc::api::{
 	open_channel_request, Bolt11ReceiveRequest, Bolt12ReceiveRequest, GetBalancesRequest,
-	OnchainReceiveRequest, OpenChannelRequest,
+	GetNodeInfoRequest, GetPermissionsRequest, OnchainReceiveRequest, OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event;
 use ldk_server_client::ldk_server_grpc::events::{
@@ -78,6 +79,68 @@ async fn test_cli_get_balances() {
 	assert_eq!(output["total_onchain_balance_sats"], 0);
 	assert_eq!(output["spendable_onchain_balance_sats"], 0);
 	assert_eq!(output["total_lightning_balance_sats"], 0);
+}
+
+#[tokio::test]
+async fn test_scoped_api_key_lifecycle() {
+	let bitcoind = TestBitcoind::new();
+	let server = LdkServerHandle::start(&bitcoind).await;
+
+	let created = run_cli(&server, &["create-api-key", "readonly-client", "--preset", "readonly"]);
+	let key_id = created["api_key"]["id"].as_str().unwrap();
+	let secret = created["secret"].as_str().unwrap();
+	let certificate = std::fs::read(&server.tls_cert_path).unwrap();
+	let client = LdkServerClient::new(
+		format!("127.0.0.1:{}", server.grpc_port),
+		secret.to_string(),
+		&certificate,
+	)
+	.unwrap();
+
+	client.get_node_info(GetNodeInfoRequest {}).await.unwrap();
+	let permissions = client.get_permissions(GetPermissionsRequest {}).await.unwrap();
+	assert_eq!(permissions.api_key.unwrap().name, "readonly-client");
+	assert!(client.onchain_receive(OnchainReceiveRequest {}).await.is_err());
+	assert!(client.list_api_keys(Default::default()).await.is_err());
+
+	let keys = run_cli(&server, &["list-api-keys"]);
+	assert!(keys["api_keys"].as_array().unwrap().iter().any(|key| key["id"] == key_id));
+	// Invalid request fields distinguish reaching the splice handler from an auth rejection.
+	for (name, permission, expected) in [
+		("manager", "channels:manage", ldk_server_client::error::LdkServerErrorCode::AuthError),
+		(
+			"splicer",
+			"channels:splice",
+			ldk_server_client::error::LdkServerErrorCode::InvalidRequestError,
+		),
+	] {
+		let created = run_cli(&server, &["create-api-key", name, "--permissions", permission]);
+		let scoped_client = LdkServerClient::new(
+			format!("127.0.0.1:{}", server.grpc_port),
+			created["secret"].as_str().unwrap().to_string(),
+			&certificate,
+		)
+		.unwrap();
+		assert_eq!(
+			scoped_client.splice_in(Default::default()).await.unwrap_err().error_code,
+			expected
+		);
+		assert_eq!(
+			scoped_client.splice_out(Default::default()).await.unwrap_err().error_code,
+			expected
+		);
+	}
+
+	let mut stream = client.subscribe_events().await.unwrap();
+	run_cli(&server, &["revoke-api-key", key_id]);
+	let error = tokio::time::timeout(Duration::from_secs(5), stream.next_message())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap_err();
+	assert_eq!(error.error_code, ldk_server_client::error::LdkServerErrorCode::AuthError);
+	assert!(stream.next_message().await.is_none());
+	assert!(client.get_node_info(GetNodeInfoRequest {}).await.is_err());
 }
 
 #[tokio::test]

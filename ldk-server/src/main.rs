@@ -8,14 +8,14 @@
 // licenses.
 
 mod api;
+mod api_keys;
 mod io;
 mod service;
 mod util;
 
 use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::prelude::BASE64_STANDARD;
@@ -41,6 +41,7 @@ use tokio::signal::unix::SignalKind;
 use tokio::sync::broadcast;
 
 use crate::api::node_to_proto_custom_tlv;
+use crate::api_keys::ApiKeyStore;
 use crate::io::persist::paginated_kv_store::PaginatedKVStore;
 use crate::io::persist::sqlite_store::SqliteStore;
 use crate::io::persist::{
@@ -53,10 +54,9 @@ use crate::util::config::{load_config, ArgsConfig, ChainSource};
 use crate::util::logger::{LogConfig, ServerLogger};
 use crate::util::metrics::Metrics;
 use crate::util::proto_adapter::{forwarded_payment_to_proto, payment_to_proto};
+use crate::util::systemd;
 use crate::util::tls::get_or_generate_tls_config;
-use crate::util::{systemd, write_new};
 
-const API_KEY_FILE: &str = "api_key";
 const FULL_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
 
 pub fn get_default_data_dir() -> Option<PathBuf> {
@@ -143,10 +143,10 @@ fn main() {
 		},
 	};
 
-	let api_key = match load_or_generate_api_key(&network_dir) {
-		Ok(key) => key,
+	let api_key_store = match ApiKeyStore::load_or_create(&network_dir) {
+		Ok(store) => Arc::new(RwLock::new(store)),
 		Err(e) => {
-			eprintln!("Failed to load or generate API key: {e}");
+			eprintln!("Failed to load or create API keys: {e}");
 			std::process::exit(-1);
 		},
 	};
@@ -647,7 +647,7 @@ fn main() {
 							let node_service = NodeService::new(
 								Arc::clone(&node),
 								Arc::clone(&paginated_store),
-								api_key.clone(),
+								Arc::clone(&api_key_store),
 								metrics.clone(),
 								metrics_auth_header.clone(),
 								event_sender.clone(),
@@ -910,29 +910,6 @@ fn upsert_payment_details(
 		Err(e) => {
 			error!("Failed to write payment to persistence: {e}");
 		},
-	}
-}
-
-/// Loads the API key from a file, or generates a new one if it doesn't exist.
-/// The API key file is stored with 0400 permissions (read-only for owner).
-fn load_or_generate_api_key(storage_dir: &Path) -> std::io::Result<String> {
-	let api_key_path = storage_dir.join(API_KEY_FILE);
-
-	if api_key_path.exists() {
-		let key_bytes = fs::read(&api_key_path)?;
-		Ok(key_bytes.to_lower_hex_string())
-	} else {
-		// Ensure the storage directory exists
-		fs::create_dir_all(storage_dir)?;
-
-		// Generate a 32-byte random API key
-		let mut key_bytes = [0u8; 32];
-		getrandom::getrandom(&mut key_bytes).map_err(std::io::Error::other)?;
-
-		write_new(&api_key_path, &key_bytes, 0o400)?;
-
-		debug!("Generated new API key at {}", api_key_path.display());
-		Ok(key_bytes.to_lower_hex_string())
 	}
 }
 

@@ -18,6 +18,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub const GRPC_STATUS_OK: u32 = 0;
 pub const GRPC_STATUS_INVALID_ARGUMENT: u32 = 3;
 pub const GRPC_STATUS_DEADLINE_EXCEEDED: u32 = 4;
+pub const GRPC_STATUS_PERMISSION_DENIED: u32 = 7;
 pub const GRPC_STATUS_FAILED_PRECONDITION: u32 = 9;
 pub const GRPC_STATUS_UNIMPLEMENTED: u32 = 12;
 pub const GRPC_STATUS_INTERNAL: u32 = 13;
@@ -104,6 +105,12 @@ pub enum GrpcBody {
 	/// Multiple gRPC-framed messages streamed from a channel, followed by trailers.
 	/// Send `Err(GrpcStatus)` to terminate the stream with an error status.
 	Stream { rx: tokio::sync::mpsc::Receiver<Result<Bytes, GrpcStatus>>, done: bool },
+	/// A stream that terminates when cancellation resolves, discarding queued messages.
+	CancellableStream {
+		rx: tokio::sync::mpsc::Receiver<Result<Bytes, GrpcStatus>>,
+		cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = GrpcStatus> + Send>>,
+		done: bool,
+	},
 	/// Plain (non-gRPC) response body with no trailers, used for non-RPC endpoints like metrics.
 	Plain { data: Option<Bytes> },
 }
@@ -118,6 +125,16 @@ impl http_body::Body for GrpcBody {
 		use std::task::Poll;
 
 		let this = self.get_mut();
+		if let GrpcBody::CancellableStream { cancellation, done, .. } = this {
+			if *done {
+				return Poll::Ready(None);
+			}
+			if let Poll::Ready(status) = cancellation.as_mut().poll(_cx) {
+				// Drop the receiver so a blocked producer exits and queued events are discarded.
+				*this = GrpcBody::Empty;
+				return Poll::Ready(Some(Ok(http_body::Frame::trailers(error_trailers(&status)))));
+			}
+		}
 		match this {
 			GrpcBody::Unary { data, trailers_sent } => {
 				if let Some(bytes) = data.take() {
@@ -130,7 +147,7 @@ impl http_body::Body for GrpcBody {
 				}
 			},
 			GrpcBody::Empty => Poll::Ready(None),
-			GrpcBody::Stream { rx, done } => {
+			GrpcBody::Stream { rx, done } | GrpcBody::CancellableStream { rx, done, .. } => {
 				if *done {
 					return Poll::Ready(None);
 				}

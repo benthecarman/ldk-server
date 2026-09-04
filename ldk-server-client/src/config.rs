@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 const DEFAULT_CERT_FILE: &str = "tls.crt";
 const API_KEY_FILE: &str = "api_key";
+const API_KEYS_DIR: &str = "api_keys";
+const ADMIN_API_KEY_FILE: &str = "admin.toml";
 
 /// Default address of the `ldk-server` gRPC endpoint when no explicit value is configured.
 pub const DEFAULT_GRPC_SERVICE_ADDRESS: &str = "127.0.0.1:3536";
@@ -58,9 +60,20 @@ pub fn get_default_api_key_path(network: &str) -> Option<PathBuf> {
 	get_default_data_dir().map(|path| path.join(network).join(API_KEY_FILE))
 }
 
+/// Default path of the network-scoped admin API key file.
+pub fn get_default_admin_api_key_path(network: &str) -> Option<PathBuf> {
+	get_default_data_dir()
+		.map(|path| path.join(network).join(API_KEYS_DIR).join(ADMIN_API_KEY_FILE))
+}
+
 /// Path of the network-scoped API key file inside the given storage directory.
 pub fn api_key_path_for_storage_dir(storage_dir: &str, network: &str) -> PathBuf {
 	PathBuf::from(storage_dir).join(network).join(API_KEY_FILE)
+}
+
+/// Path of the network-scoped admin API key file inside the given storage directory.
+pub fn admin_api_key_path_for_storage_dir(storage_dir: &str, network: &str) -> PathBuf {
+	PathBuf::from(storage_dir).join(network).join(API_KEYS_DIR).join(ADMIN_API_KEY_FILE)
 }
 
 /// Path of the server's TLS certificate inside the given storage directory.
@@ -144,20 +157,36 @@ pub fn resolve_base_url(override_url: Option<String>, config: Option<&Config>) -
 /// Resolves the API key used to authenticate against the `ldk-server` gRPC endpoint.
 ///
 /// Prefers `override_key`, falls back to reading the API key file from the configured storage
-/// directory, and finally from the OS-specific default data directory. The raw bytes read from
-/// disk are lower-hex encoded before being returned.
+/// directory, and finally from the OS-specific default data directory. The scoped admin key is
+/// preferred, with the legacy raw key file retained as a fallback during migration.
 pub fn resolve_api_key(override_key: Option<String>, config: Option<&Config>) -> Option<String> {
 	override_key.or_else(|| {
 		let network =
 			config.and_then(|c| c.network().ok()).unwrap_or_else(|| "bitcoin".to_string());
-		storage_dir(config)
-			.map(|dir| api_key_path_for_storage_dir(dir, &network))
-			.and_then(|path| std::fs::read(&path).ok())
-			.or_else(|| {
-				get_default_api_key_path(&network).and_then(|path| std::fs::read(&path).ok())
-			})
-			.map(|bytes| bytes.to_lower_hex_string())
+		let configured_admin = storage_dir(config)
+			.map(|dir| admin_api_key_path_for_storage_dir(dir, &network))
+			.and_then(read_admin_api_key);
+		let default_admin = get_default_admin_api_key_path(&network).and_then(read_admin_api_key);
+		configured_admin.or(default_admin).or_else(|| {
+			storage_dir(config)
+				.map(|dir| api_key_path_for_storage_dir(dir, &network))
+				.and_then(|path| std::fs::read(&path).ok())
+				.or_else(|| {
+					get_default_api_key_path(&network).and_then(|path| std::fs::read(&path).ok())
+				})
+				.map(|bytes| bytes.to_lower_hex_string())
+		})
 	})
+}
+
+#[derive(Deserialize)]
+struct StoredAdminApiKey {
+	key: String,
+}
+
+fn read_admin_api_key(path: PathBuf) -> Option<String> {
+	let contents = std::fs::read_to_string(path).ok()?;
+	toml::from_str::<StoredAdminApiKey>(&contents).ok().map(|stored| stored.key)
 }
 
 /// Resolves the path to the server's TLS certificate (PEM).
@@ -187,7 +216,12 @@ fn default_grpc_service_address() -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{resolve_base_url, Config, DEFAULT_GRPC_SERVICE_ADDRESS};
+	use std::fs;
+	use std::sync::atomic::{AtomicU32, Ordering};
+
+	use super::{resolve_api_key, resolve_base_url, Config, DEFAULT_GRPC_SERVICE_ADDRESS};
+
+	static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 	#[test]
 	fn config_defaults_grpc_service_address() {
@@ -281,5 +315,38 @@ mod tests {
 	#[test]
 	fn resolve_base_url_falls_back_to_default() {
 		assert_eq!(resolve_base_url(None, None), DEFAULT_GRPC_SERVICE_ADDRESS);
+	}
+
+	#[test]
+	fn resolve_api_key_reads_scoped_admin_file() {
+		let count = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+		let directory = std::env::temp_dir()
+			.join(format!("ldk-server-client-config-test-{}-{count}", std::process::id()));
+		let admin_directory = directory.join("regtest").join("api_keys");
+		fs::create_dir_all(&admin_directory).unwrap();
+		let secret = "42".repeat(32);
+		fs::write(
+			admin_directory.join("admin.toml"),
+			format!(
+				"id = \"{}\"\nname = \"admin\"\nkey = \"{secret}\"\npermissions = [\"admin\"]\n",
+				"24".repeat(16)
+			),
+		)
+		.unwrap();
+		let config: Config = toml::from_str(&format!(
+			r#"
+				[node]
+				network = "regtest"
+
+				[storage.disk]
+				dir_path = "{}"
+			"#,
+			directory.display()
+		))
+		.unwrap();
+
+		assert_eq!(resolve_api_key(None, Some(&config)), Some(secret));
+
+		fs::remove_dir_all(directory).unwrap();
 	}
 }
