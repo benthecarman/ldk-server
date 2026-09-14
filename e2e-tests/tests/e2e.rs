@@ -9,12 +9,12 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use e2e_tests::{
 	find_available_port, mine_and_sync, run_cli, run_cli_raw, run_cli_with_config,
 	setup_funded_channel, wait_for_event, wait_for_onchain_balance, wait_for_usable_channel,
-	LdkServerConfig, LdkServerHandle, TestBitcoind,
+	LdkServerConfig, LdkServerHandle, TestBitcoind, TestConfigBuilder,
 };
 use hex_conservative::{DisplayHex, FromHex};
 use ldk_node::bitcoin::hashes::{sha256, Hash};
@@ -25,7 +25,8 @@ use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_client::error::LdkServerErrorCode::InvalidRequestError;
 use ldk_server_client::ldk_server_grpc::api::{
 	open_channel_request, Bolt11ClaimForIdRequest, Bolt11FailForIdRequest, Bolt11ReceiveRequest,
-	Bolt12ReceiveRequest, GetBalancesRequest, OnchainReceiveRequest, OpenChannelRequest,
+	Bolt12ReceiveRequest, GetBalancesRequest, ListForwardedPaymentsRequest, OnchainReceiveRequest,
+	OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event;
 use ldk_server_client::ldk_server_grpc::events::{
@@ -106,6 +107,14 @@ async fn test_cli_list_forwarded_payments_empty() {
 
 	let output = run_cli(&server, &["list-forwarded-payments"]);
 	assert!(output["list"].as_array().unwrap().is_empty());
+	let error = server
+		.client()
+		.list_forwarded_payments(ListForwardedPaymentsRequest {
+			page_token: Some("invalid-token".to_string()),
+		})
+		.await
+		.unwrap_err();
+	assert_eq!(error.error_code, InvalidRequestError);
 }
 
 #[tokio::test]
@@ -1423,14 +1432,26 @@ async fn test_cli_completions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_forwarded_payment_event() {
+async fn test_forwarded_payment_event_and_history() {
+	forwarded_payment_event_and_history("detailed").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_forwarded_payment_stats_mode() {
+	forwarded_payment_event_and_history("stats").await;
+}
+
+async fn forwarded_payment_event_and_history(tracking_mode: &str) {
 	let bitcoind = TestBitcoind::new();
 
 	// A: normal payer node
 	let server_a = LdkServerHandle::start(&bitcoind).await;
 
 	// B: LSP node (all e2e servers include LSPS2 service config)
-	let server_b = LdkServerHandle::start(&bitcoind).await;
+	let server_b = LdkServerHandle::start_with_config(&bitcoind, |params| {
+		TestConfigBuilder::new(params).forwarded_payment_tracking_mode(tracking_mode).build()
+	})
+	.await;
 
 	// Subscribe to events on B before any payments
 	let mut events_b = server_b.client().subscribe_events().await.unwrap();
@@ -1482,6 +1503,7 @@ async fn test_forwarded_payment_event() {
 		.receive_via_jit_channel(100_000_000, &description, 3600, None)
 		.unwrap();
 
+	let sent_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 	// A pays the JIT invoice (routes through B)
 	run_cli(&server_a, &["bolt11-send", &jit_invoice.to_string()]);
 
@@ -1507,9 +1529,88 @@ async fn test_forwarded_payment_event() {
 	})
 	.await
 	.expect("Timed out waiting for PaymentForwarded event on LSP node B");
-	assert!(matches!(&forwarded.event, Some(Event::PaymentForwarded(_))));
+	let Some(Event::PaymentForwarded(event)) = forwarded.event else {
+		panic!("Expected a forwarded payment event");
+	};
+	let event_payment = event;
+	let received_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+	let event_timestamp = event_payment.observed_at_timestamp;
+	assert!(event_timestamp >= sent_at);
+	assert!(event_timestamp <= received_at);
+	assert_eq!(event_payment.prev_htlcs.len(), 1);
+	assert_eq!(event_payment.next_htlcs.len(), 1);
+	assert!(event_payment.total_fee_earned_msat.is_some());
+
+	// LDK Node persists the forward before it emits the event.
+	let history = server_b
+		.client()
+		.list_forwarded_payments(ListForwardedPaymentsRequest { page_token: None })
+		.await
+		.unwrap();
+	if tracking_mode == "stats" {
+		assert!(history.forwarded_payments.is_empty());
+		assert!(history.next_page_token.is_none());
+		node_c.stop().unwrap();
+		return;
+	}
+	assert_eq!(history.forwarded_payments.len(), 1);
+	let record = &history.forwarded_payments[0];
+	let timestamp = record.forwarded_at_timestamp;
+	assert!(timestamp > 0);
+	assert!(timestamp >= sent_at);
+	assert!(timestamp <= event_timestamp);
+	assert_eq!(record.id.len(), 64);
+	assert!(ldk_node::payment::ForwardedPaymentId::from_str(&record.id).is_ok());
+	assert_eq!(record.prev_channel_id, event_payment.prev_htlcs[0].channel_id);
+	assert_eq!(record.next_channel_id, event_payment.next_htlcs[0].channel_id);
+	assert_eq!(record.prev_user_channel_id, event_payment.prev_htlcs[0].user_channel_id);
+	assert_eq!(record.next_user_channel_id, event_payment.next_htlcs[0].user_channel_id);
+	assert_eq!(record.prev_node_id, event_payment.prev_htlcs[0].node_id);
+	assert_eq!(record.next_node_id, event_payment.next_htlcs[0].node_id);
+	assert_eq!(record.inbound_amount_forwarded_msat, event_payment.prev_htlcs[0].amount_msat);
+	assert_eq!(record.outbound_amount_forwarded_msat, event_payment.next_htlcs[0].amount_msat);
+	assert_eq!(
+		record.outbound_amount_forwarded_msat,
+		Some(event_payment.outbound_amount_forwarded_msat)
+	);
+	assert_eq!(record.total_fee_earned_msat, event_payment.total_fee_earned_msat);
+	assert_eq!(record.skimmed_fee_msat, event_payment.skimmed_fee_msat);
+	assert_eq!(record.claim_from_onchain_tx, event_payment.claim_from_onchain_tx);
+	assert!(history.next_page_token.is_none());
 
 	node_c.stop().unwrap();
+
+	// Reopen the same database through LDK Node after stopping the server.
+	let storage_dir_b = server_b.storage_dir.clone();
+	drop(events_b);
+	drop(server_b);
+	let mnemonic_b = std::fs::read_to_string(storage_dir_b.join("keys_mnemonic")).unwrap();
+	let entropy_b = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(
+		ldk_node::bip39::Mnemonic::from_str(mnemonic_b.trim()).unwrap(),
+		None,
+	);
+	let mut builder_b = ldk_node::Builder::from_config(ldk_node::config::Config {
+		network: ldk_node::bitcoin::Network::Regtest,
+		storage_dir_path: storage_dir_b.join("regtest").to_str().unwrap().to_string(),
+		forwarded_payment_tracking_mode: ldk_node::config::ForwardedPaymentTrackingMode::Detailed,
+		..Default::default()
+	});
+	let (host, port, user, password) = bitcoind.rpc_details();
+	builder_b.set_chain_source_bitcoind_rpc(host, port, user, password, None);
+	let node_b = builder_b.build(entropy_b).unwrap();
+	let persisted = node_b.forwarding_analytics().list_payments(None).unwrap();
+	assert_eq!(persisted.payments.len(), 1);
+	let payment = &persisted.payments[0];
+	let expected = &history.forwarded_payments[0];
+	assert_eq!(payment.id.to_string(), expected.id);
+	assert_eq!(timestamp, payment.forwarded_at_timestamp);
+	assert_eq!(payment.prev_channel_id.to_string(), expected.prev_channel_id);
+	assert_eq!(payment.next_channel_id.to_string(), expected.next_channel_id);
+	assert_eq!(payment.inbound_amount_forwarded_msat, expected.inbound_amount_forwarded_msat);
+	assert_eq!(payment.outbound_amount_forwarded_msat, expected.outbound_amount_forwarded_msat);
+	assert_eq!(payment.total_fee_earned_msat, expected.total_fee_earned_msat);
+	assert_eq!(payment.skimmed_fee_msat, expected.skimmed_fee_msat);
+	assert_eq!(payment.claim_from_onchain_tx, expected.claim_from_onchain_tx);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

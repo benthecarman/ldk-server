@@ -932,8 +932,11 @@ pub struct ListPaymentsResponse {
 	#[prost(string, optional, tag = "2")]
 	pub next_page_token: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Retrieves list of all forwarded payments.
-/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded>
+/// Retrieves a paginated list of forwarded payments from LDK Node's detailed history.
+/// LDK Node retains records for the current and previous one-hour buckets, then aggregates them
+/// into hourly channel-pair statistics and removes the individual records.
+/// Only forwards with one incoming HTLC, one outgoing HTLC, and a known fee are recorded.
+/// See more: <https://docs.rs/ldk-node/latest/ldk_node/payment/struct.ForwardingAnalytics.html#method.list_payments>
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "serde", serde(default))]

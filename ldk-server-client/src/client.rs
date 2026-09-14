@@ -356,7 +356,7 @@ impl LdkServerClient {
 		self.grpc_unary(&request, GET_PAYMENT_DETAILS_PATH).await
 	}
 
-	/// Retrieves list of all forwarded payments.
+	/// Retrieves a paginated list of forwarded payments.
 	pub async fn list_forwarded_payments(
 		&self, request: ListForwardedPaymentsRequest,
 	) -> Result<ListForwardedPaymentsResponse, LdkServerError> {

@@ -454,59 +454,58 @@ pub struct HtlcLocator {
 	#[prost(string, optional, tag = "3")]
 	pub node_id: ::core::option::Option<::prost::alloc::string::String>,
 	/// The amount in millisatoshis of the HTLC that was sent or received, if known.
-	/// This can be unset for events serialized by LDK Node v0.7.0 and prior,
-	/// or forwarding records stored by LDK Server before this field was added.
+	/// This can be unset for events serialized by LDK Node v0.7.0 and prior.
 	#[prost(uint64, optional, tag = "4")]
 	pub amount_msat: ::core::option::Option<u64>,
 }
-/// A forwarded payment through our node.
-///
-/// A forwarded payment can involve multiple incoming and outgoing HTLCs, e.g. when acting as a
-/// trampoline router. The `prev_htlcs` and `next_htlcs` fields are the canonical representation of
-/// the HTLCs associated with this forwarding event. Their indices do not imply pairwise
-/// correspondence.
-///
-/// See more: <https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded>
+/// A stored forwarding record from LDK Node's detailed history.
+/// Each record describes one incoming and one outgoing HTLC.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "serde", serde(default))]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ForwardedPayment {
-	/// The total fee, in milli-satoshis, which was earned as a result of the payment.
-	///
-	/// Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC was pending, the amount the
-	/// next hop claimed will have been rounded down to the nearest whole satoshi. Thus, the fee calculated here may be
-	/// higher than expected as we still claimed the full value in millisatoshis from the source.
-	/// In this case, `claim_from_onchain_tx` will be set.
-	///
-	/// If the channel which sent us the payment has been force-closed, we will claim the funds via an on-chain transaction.
-	/// In that case we do not yet know the on-chain transaction fees which we will spend and will instead set this to `None`.
-	#[prost(uint64, optional, tag = "1")]
+	/// The opaque, hex-encoded identifier assigned by LDK Node.
+	#[prost(string, tag = "1")]
+	pub id: ::prost::alloc::string::String,
+	/// The incoming channel ID.
+	#[prost(string, tag = "2")]
+	pub prev_channel_id: ::prost::alloc::string::String,
+	/// The outgoing channel ID.
+	#[prost(string, tag = "3")]
+	pub next_channel_id: ::prost::alloc::string::String,
+	/// The incoming user channel ID as a decimal string, if known.
+	#[prost(string, optional, tag = "4")]
+	pub prev_user_channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The outgoing user channel ID as a decimal string, if known.
+	#[prost(string, optional, tag = "5")]
+	pub next_user_channel_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The previous node's public key, if known.
+	#[prost(string, optional, tag = "6")]
+	pub prev_node_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The next node's public key, if known.
+	#[prost(string, optional, tag = "7")]
+	pub next_node_id: ::core::option::Option<::prost::alloc::string::String>,
+	/// The incoming amount, in millisatoshis, if known.
+	#[prost(uint64, optional, tag = "8")]
+	pub inbound_amount_forwarded_msat: ::core::option::Option<u64>,
+	/// The total fee earned, in millisatoshis, if known.
+	#[prost(uint64, optional, tag = "9")]
 	pub total_fee_earned_msat: ::core::option::Option<u64>,
-	/// The share of the total fee, in milli-satoshis, which was withheld in addition to the forwarding fee.
-	/// This will only be set if we forwarded an intercepted HTLC with less than the expected amount. This means our
-	/// counterparty accepted to receive less than the invoice amount.
-	///
-	/// The caveat described above the `total_fee_earned_msat` field applies here as well.
-	#[prost(uint64, optional, tag = "2")]
+	/// The share of the total fee withheld in addition to the forwarding fee, if known.
+	/// This is included in total_fee_earned_msat; do not add the two amounts.
+	#[prost(uint64, optional, tag = "10")]
 	pub skimmed_fee_msat: ::core::option::Option<u64>,
-	/// If this is true, the forwarded HTLC was claimed by our counterparty via an on-chain transaction.
-	#[prost(bool, tag = "3")]
+	/// Whether the next hop claimed the forwarded HTLC through an on-chain transaction.
+	#[prost(bool, tag = "11")]
 	pub claim_from_onchain_tx: bool,
-	/// The final amount forwarded, in milli-satoshis, after the fee is deducted.
-	///
-	/// The caveat described above the `total_fee_earned_msat` field applies here as well.
-	#[prost(uint64, optional, tag = "4")]
+	/// The outgoing amount, in millisatoshis, if known.
+	#[prost(uint64, optional, tag = "12")]
 	pub outbound_amount_forwarded_msat: ::core::option::Option<u64>,
-	/// The set of incoming HTLCs forwarded to our node that will be claimed by this forward.
-	/// This is the canonical incoming HTLC representation.
-	#[prost(message, repeated, tag = "5")]
-	pub prev_htlcs: ::prost::alloc::vec::Vec<HtlcLocator>,
-	/// The set of outgoing HTLCs forwarded by our node that have been claimed by this forward.
-	/// This is the canonical outgoing HTLC representation.
-	#[prost(message, repeated, tag = "6")]
-	pub next_htlcs: ::prost::alloc::vec::Vec<HtlcLocator>,
+	/// LDK Node's stored forwarding time, in seconds since the Unix epoch.
+	#[prost(uint64, tag = "13")]
+	pub forwarded_at_timestamp: u64,
 }
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]

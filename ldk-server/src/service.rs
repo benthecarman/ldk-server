@@ -85,7 +85,6 @@ use crate::api::spontaneous_send::handle_spontaneous_send_request;
 use crate::api::unified_send::handle_unified_send_request;
 use crate::api::update_channel_config::handle_update_channel_config_request;
 use crate::api::verify_signature::handle_verify_signature_request;
-use crate::io::persist::paginated_kv_store::PaginatedKVStore;
 use crate::util::metrics::Metrics;
 
 /// gRPC path prefix for the LightningNode service.
@@ -106,12 +105,11 @@ pub(crate) struct NodeService {
 
 impl NodeService {
 	pub(crate) fn new(
-		node: Arc<Node>, paginated_kv_store: Arc<dyn PaginatedKVStore>, api_key: String,
-		metrics: Option<Arc<Metrics>>, metrics_auth_header: Option<String>,
-		event_sender: broadcast::Sender<EventEnvelope>,
+		node: Arc<Node>, api_key: String, metrics: Option<Arc<Metrics>>,
+		metrics_auth_header: Option<String>, event_sender: broadcast::Sender<EventEnvelope>,
 		shutdown_rx: tokio::sync::watch::Receiver<bool>,
 	) -> Self {
-		let context = Arc::new(Context { node, paginated_kv_store });
+		let context = Arc::new(Context { node });
 		Self { context, api_key, metrics, metrics_auth_header, event_sender, shutdown_rx }
 	}
 }
@@ -169,7 +167,6 @@ fn validate_auth<B>(req: &Request<B>, api_key: &str, body: &[u8]) -> Result<(), 
 
 pub(crate) struct Context {
 	pub(crate) node: Arc<Node>,
-	pub(crate) paginated_kv_store: Arc<dyn PaginatedKVStore>,
 }
 
 impl Service<Request<Incoming>> for NodeService {

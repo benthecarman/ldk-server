@@ -47,7 +47,7 @@ use ldk_server_grpc::types::transaction_type::Kind::{
 use ldk_server_grpc::types::{
 	bolt11_invoice_description, AnchorBump, Channel,
 	ChannelShutdownState as ProtoChannelShutdownState, Claim, CooperativeClose, Feature,
-	ForwardedPayment, Funding, HtlcLocator, InteractiveFunding, OutPoint, Payment, Peer,
+	ForwardedPayment, Funding, InteractiveFunding, OutPoint, Payment, Peer,
 	ReserveType as ProtoReserveType, Sweep, TransactionChannel,
 	TransactionType as ProtoTransactionType, UnilateralClose,
 };
@@ -501,17 +501,22 @@ pub(crate) fn pending_sweep_balance_to_proto(
 }
 
 pub(crate) fn forwarded_payment_to_proto(
-	prev_htlcs: Vec<HtlcLocator>, next_htlcs: Vec<HtlcLocator>, total_fee_earned_msat: Option<u64>,
-	skimmed_fee_msat: Option<u64>, claim_from_onchain_tx: bool,
-	outbound_amount_forwarded_msat: Option<u64>,
+	payment: ldk_node::payment::ForwardedPaymentDetails,
 ) -> ForwardedPayment {
 	ForwardedPayment {
-		total_fee_earned_msat,
-		skimmed_fee_msat,
-		claim_from_onchain_tx,
-		outbound_amount_forwarded_msat,
-		prev_htlcs,
-		next_htlcs,
+		id: payment.id.to_string(),
+		prev_channel_id: payment.prev_channel_id.to_string(),
+		next_channel_id: payment.next_channel_id.to_string(),
+		prev_user_channel_id: payment.prev_user_channel_id.map(|id| id.0.to_string()),
+		next_user_channel_id: payment.next_user_channel_id.map(|id| id.0.to_string()),
+		prev_node_id: payment.prev_node_id.map(|id| id.to_string()),
+		next_node_id: payment.next_node_id.map(|id| id.to_string()),
+		inbound_amount_forwarded_msat: payment.inbound_amount_forwarded_msat,
+		total_fee_earned_msat: payment.total_fee_earned_msat,
+		skimmed_fee_msat: payment.skimmed_fee_msat,
+		claim_from_onchain_tx: payment.claim_from_onchain_tx,
+		outbound_amount_forwarded_msat: payment.outbound_amount_forwarded_msat,
+		forwarded_at_timestamp: payment.forwarded_at_timestamp,
 	}
 }
 
@@ -689,6 +694,51 @@ mod tests {
 
 	fn test_channel_id(byte: u8) -> ChannelId {
 		ChannelId([byte; 32])
+	}
+
+	#[test]
+	fn forwarded_payment_preserves_id_amounts_and_optional_fields() {
+		let payment = ldk_node::payment::ForwardedPaymentDetails {
+			id: ldk_node::payment::ForwardedPaymentId([3; 32]),
+			prev_channel_id: test_channel_id(1),
+			next_channel_id: test_channel_id(2),
+			prev_user_channel_id: Some(ldk_node::UserChannelId(u128::MAX)),
+			next_user_channel_id: None,
+			prev_node_id: Some(test_pubkey()),
+			next_node_id: None,
+			inbound_amount_forwarded_msat: Some(105_000),
+			total_fee_earned_msat: Some(5_000),
+			skimmed_fee_msat: Some(4_000),
+			claim_from_onchain_tx: true,
+			outbound_amount_forwarded_msat: Some(100_000),
+			forwarded_at_timestamp: 1_700_000_000,
+		};
+		let proto = forwarded_payment_to_proto(payment.clone());
+		assert_eq!(proto.id, "03".repeat(32));
+		assert_eq!(proto.forwarded_at_timestamp, 1_700_000_000);
+		assert_eq!(proto.total_fee_earned_msat, Some(5_000));
+		assert_eq!(proto.skimmed_fee_msat, Some(4_000));
+		assert!(proto.claim_from_onchain_tx);
+		assert_eq!(proto.outbound_amount_forwarded_msat, Some(100_000));
+		assert_eq!(proto.prev_channel_id, test_channel_id(1).to_string());
+		assert_eq!(proto.next_channel_id, test_channel_id(2).to_string());
+		assert_eq!(proto.prev_user_channel_id, Some(u128::MAX.to_string()));
+		assert_eq!(proto.next_user_channel_id, None);
+		assert_eq!(proto.prev_node_id, Some(test_pubkey().to_string()));
+		assert_eq!(proto.next_node_id, None);
+		assert_eq!(proto.inbound_amount_forwarded_msat, Some(105_000));
+
+		let proto = forwarded_payment_to_proto(ldk_node::payment::ForwardedPaymentDetails {
+			inbound_amount_forwarded_msat: None,
+			outbound_amount_forwarded_msat: None,
+			total_fee_earned_msat: None,
+			skimmed_fee_msat: None,
+			..payment
+		});
+		assert_eq!(proto.inbound_amount_forwarded_msat, None);
+		assert_eq!(proto.outbound_amount_forwarded_msat, None);
+		assert_eq!(proto.total_fee_earned_msat, None);
+		assert_eq!(proto.skimmed_fee_msat, None);
 	}
 
 	#[test]

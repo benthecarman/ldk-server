@@ -161,7 +161,7 @@ when the invoice is paid.
 |-------------------------|------------------------------------------------|
 | `GetPaymentDetails`     | Get details for a specific payment by ID       |
 | `ListPayments`          | List all payments (paginated)                  |
-| `ListForwardedPayments` | List all forwarded/routed payments (paginated) |
+| `ListForwardedPayments` | List forwarded payments (paginated) |
 
 See [Pagination](#pagination) below for how to page through results.
 

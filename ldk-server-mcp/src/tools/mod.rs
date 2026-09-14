@@ -243,7 +243,7 @@ pub fn build_tool_registry() -> ToolRegistry {
 		),
 		tool_spec(
 			"list_forwarded_payments",
-			"List all forwarded payments (supports pagination via page_token)",
+			"Retrieve a paginated list of forwarded payments (use page_token for subsequent pages)",
 			schema::list_forwarded_payments_schema,
 			|client, args| Box::pin(handlers::handle_list_forwarded_payments(client, args)),
 		),

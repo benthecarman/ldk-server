@@ -548,7 +548,7 @@ enum Commands {
 		#[arg(help = "The payment ID in hex-encoded form")]
 		payment_id: String,
 	},
-	#[command(about = "Retrieves list of all forwarded payments")]
+	#[command(about = "Retrieves a paginated list of forwarded payments")]
 	ListForwardedPayments {
 		#[arg(
 			short,
