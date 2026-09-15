@@ -25,7 +25,9 @@ use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_server_client::error::LdkServerErrorCode::InvalidRequestError;
 use ldk_server_client::ldk_server_grpc::api::{
 	open_channel_request, Bolt11ClaimForIdRequest, Bolt11FailForIdRequest, Bolt11ReceiveRequest,
-	Bolt12ReceiveRequest, GetBalancesRequest, ListForwardedPaymentsRequest, OnchainReceiveRequest,
+	Bolt12ReceiveRequest, GetBalancesRequest, GetChannelForwardingStatsRequest,
+	GetForwardedPaymentDetailsRequest, ListChannelForwardingStatsRequest,
+	ListChannelPairForwardingStatsRequest, ListForwardedPaymentsRequest, OnchainReceiveRequest,
 	OpenChannelRequest,
 };
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event;
@@ -110,6 +112,57 @@ async fn test_cli_list_forwarded_payments_empty() {
 	let error = server
 		.client()
 		.list_forwarded_payments(ListForwardedPaymentsRequest {
+			page_token: Some("invalid-token".to_string()),
+		})
+		.await
+		.unwrap_err();
+	assert_eq!(error.error_code, InvalidRequestError);
+}
+
+#[tokio::test]
+async fn test_forwarding_analytics_empty_and_invalid_requests() {
+	let bitcoind = TestBitcoind::new();
+	let server = LdkServerHandle::start(&bitcoind).await;
+	let mode = run_cli(&server, &["get-forwarded-payment-tracking-mode"]);
+	assert_eq!(mode["mode"], "FORWARDED_PAYMENT_TRACKING_MODE_STATS");
+	for command in ["list-channel-forwarding-stats", "list-channel-pair-forwarding-stats"] {
+		let output = run_cli(&server, &[command, "--number-of-records", "1"]);
+		assert!(output["list"].as_array().unwrap().is_empty());
+	}
+	let unknown_id = "00".repeat(32);
+	let payment = run_cli(&server, &["get-forwarded-payment-details", &unknown_id]);
+	assert!(payment["payment"].is_null());
+	let stats = run_cli(&server, &["get-channel-forwarding-stats", &unknown_id]);
+	assert!(stats["stats"].is_null());
+	for invalid_id in ["", "01", &"zz".repeat(32)] {
+		let error = server
+			.client()
+			.get_forwarded_payment_details(GetForwardedPaymentDetailsRequest {
+				forwarded_payment_id: invalid_id.to_string(),
+			})
+			.await
+			.unwrap_err();
+		assert_eq!(error.error_code, InvalidRequestError);
+		let error = server
+			.client()
+			.get_channel_forwarding_stats(GetChannelForwardingStatsRequest {
+				channel_id: invalid_id.to_string(),
+			})
+			.await
+			.unwrap_err();
+		assert_eq!(error.error_code, InvalidRequestError);
+	}
+	let error = server
+		.client()
+		.list_channel_forwarding_stats(ListChannelForwardingStatsRequest {
+			page_token: Some("invalid-token".to_string()),
+		})
+		.await
+		.unwrap_err();
+	assert_eq!(error.error_code, InvalidRequestError);
+	let error = server
+		.client()
+		.list_channel_pair_forwarding_stats(ListChannelPairForwardingStatsRequest {
 			page_token: Some("invalid-token".to_string()),
 		})
 		.await
@@ -1541,6 +1594,63 @@ async fn forwarded_payment_event_and_history(tracking_mode: &str) {
 	assert_eq!(event_payment.next_htlcs.len(), 1);
 	assert!(event_payment.total_fee_earned_msat.is_some());
 
+	// Both tracking modes expose per-channel totals after forwarding.
+	let mode = run_cli(&server_b, &["get-forwarded-payment-tracking-mode"]);
+	assert_eq!(
+		mode["mode"],
+		format!("FORWARDED_PAYMENT_TRACKING_MODE_{}", tracking_mode.to_uppercase())
+	);
+	let stats = server_b
+		.client()
+		.list_channel_forwarding_stats(ListChannelForwardingStatsRequest { page_token: None })
+		.await
+		.unwrap();
+	assert_eq!(stats.stats.len(), 2);
+	assert!(stats.next_page_token.is_none());
+	let prev = stats
+		.stats
+		.iter()
+		.find(|s| s.channel_id == event_payment.prev_htlcs[0].channel_id)
+		.unwrap();
+	let next = stats
+		.stats
+		.iter()
+		.find(|s| s.channel_id == event_payment.next_htlcs[0].channel_id)
+		.unwrap();
+	assert_eq!(prev.counterparty_node_id.as_deref(), Some(server_a.node_id()));
+	assert_eq!(prev.inbound_payments_forwarded, 1);
+	assert_eq!(prev.outbound_payments_forwarded, 0);
+	assert_eq!(Some(prev.total_inbound_amount_msat), event_payment.prev_htlcs[0].amount_msat);
+	assert_eq!(prev.total_outbound_amount_msat, 0);
+	assert_eq!(prev.total_fee_earned_msat, event_payment.total_fee_earned_msat);
+	assert_eq!(prev.total_skimmed_fee_msat, event_payment.skimmed_fee_msat.unwrap_or(0));
+	assert_eq!(next.inbound_payments_forwarded, 0);
+	assert_eq!(next.outbound_payments_forwarded, 1);
+	assert_eq!(next.total_inbound_amount_msat, 0);
+	assert_eq!(next.total_outbound_amount_msat, event_payment.outbound_amount_forwarded_msat);
+	assert_eq!(next.total_fee_earned_msat, Some(0));
+	assert_eq!(next.onchain_claims_count, 0);
+	assert!(prev.first_forwarded_at_timestamp >= sent_at);
+	assert!(prev.last_forwarded_at_timestamp <= event_timestamp);
+	for stat in &stats.stats {
+		let by_id = server_b
+			.client()
+			.get_channel_forwarding_stats(GetChannelForwardingStatsRequest {
+				channel_id: stat.channel_id.clone(),
+			})
+			.await
+			.unwrap();
+		assert_eq!(by_id.stats.as_ref(), Some(stat));
+	}
+	let cli_stats =
+		run_cli(&server_b, &["list-channel-forwarding-stats", "--number-of-records", "2"]);
+	assert_eq!(cli_stats["list"], serde_json::to_value(&stats.stats).unwrap());
+	let cli_stat = run_cli(&server_b, &["get-channel-forwarding-stats", &prev.channel_id]);
+	assert_eq!(cli_stat["stats"], serde_json::to_value(prev).unwrap());
+	// New forwards have not yet been aggregated into hourly channel-pair buckets.
+	let pairs = run_cli(&server_b, &["list-channel-pair-forwarding-stats"]);
+	assert!(pairs["list"].as_array().unwrap().is_empty());
+
 	// LDK Node persists the forward before it emits the event.
 	let history = server_b
 		.client()
@@ -1559,6 +1669,16 @@ async fn forwarded_payment_event_and_history(tracking_mode: &str) {
 	assert!(timestamp > 0);
 	assert!(timestamp >= sent_at);
 	assert!(timestamp <= event_timestamp);
+	let by_id = server_b
+		.client()
+		.get_forwarded_payment_details(GetForwardedPaymentDetailsRequest {
+			forwarded_payment_id: record.id.clone(),
+		})
+		.await
+		.unwrap();
+	assert_eq!(by_id.payment.as_ref(), Some(record));
+	let cli_payment = run_cli(&server_b, &["get-forwarded-payment-details", &record.id]);
+	assert_eq!(cli_payment["payment"], serde_json::to_value(record).unwrap());
 	assert_eq!(record.id.len(), 64);
 	assert!(ldk_node::payment::ForwardedPaymentId::from_str(&record.id).is_ok());
 	assert_eq!(record.prev_channel_id, event_payment.prev_htlcs[0].channel_id);

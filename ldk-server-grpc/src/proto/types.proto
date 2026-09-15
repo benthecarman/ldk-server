@@ -369,6 +369,122 @@ message ForwardedPayment {
   uint64 forwarded_at_timestamp = 13;
 }
 
+// Forwarding statistics reported by LDK Node.
+message ChannelForwardingStats {
+  // The channel id these stats apply to.
+  string channel_id = 1;
+
+  // The channel counterparty node id, if known.
+  optional string counterparty_node_id = 2;
+
+  // Number of forwarded payments where this was the incoming channel.
+  uint64 inbound_payments_forwarded = 3;
+
+  // Number of forwarded payments where this was the outgoing channel.
+  uint64 outbound_payments_forwarded = 4;
+
+  // Total inbound amount forwarded through this channel, in millisatoshis.
+  uint64 total_inbound_amount_msat = 5;
+
+  // Total outbound amount forwarded through this channel, in millisatoshis.
+  uint64 total_outbound_amount_msat = 6;
+
+  // Total forwarding fees earned through this channel, in millisatoshis, if known for every
+  // recorded forward.
+  //
+  // A single record covers this channel in both roles. A forward contributes its fee here when
+  // this was the incoming channel, and contributes nothing when this was the outgoing channel,
+  // because fees are attributed to the incoming side.
+  optional uint64 total_fee_earned_msat = 7;
+
+  // Total skimmed fees earned through this channel, in millisatoshis.
+  //
+  // This is the share of `total_fee_earned_msat` that was withheld in addition to the
+  // forwarding fee, not an amount earned on top of it. Adding the two would double-count.
+  uint64 total_skimmed_fee_msat = 8;
+
+  // Number of forwarded HTLCs that the next hop claimed from an on-chain transaction.
+  //
+  // A forward contributes here when this was the outgoing channel.
+  uint64 onchain_claims_count = 9;
+
+  // Timestamp of the first forward recorded for this channel, in seconds since the Unix epoch.
+  uint64 first_forwarded_at_timestamp = 10;
+
+  // Timestamp of the latest forward recorded for this channel, in seconds since the Unix epoch.
+  uint64 last_forwarded_at_timestamp = 11;
+}
+
+// Forwarding statistics reported by LDK Node.
+message ChannelPairForwardingStats {
+  // An opaque identifier for this channel-pair bucket.
+  string id = 1;
+
+  // The incoming channel id.
+  string prev_channel_id = 2;
+
+  // The outgoing channel id.
+  string next_channel_id = 3;
+
+  // Start timestamp of this aggregation bucket, in seconds since the Unix epoch.
+  uint64 bucket_start_timestamp = 4;
+
+  // Width of this aggregation bucket, in seconds.
+  uint64 bucket_size_secs = 5;
+
+  // The previous node id, if available.
+  optional string prev_node_id = 6;
+
+  // The next node id, if available.
+  optional string next_node_id = 7;
+
+  // Number of payments aggregated in this bucket.
+  uint64 payment_count = 8;
+
+  // Total inbound amount in this bucket, in millisatoshis.
+  uint64 total_inbound_amount_msat = 9;
+
+  // Total outbound amount in this bucket, in millisatoshis.
+  uint64 total_outbound_amount_msat = 10;
+
+  // Total forwarding fees earned in this bucket, in millisatoshis, if known for every payment.
+  optional uint64 total_fee_earned_msat = 11;
+
+  // Total skimmed fees in this bucket, in millisatoshis.
+  //
+  // This is the share of `total_fee_earned_msat` that was withheld in addition to the
+  // forwarding fee, not an amount earned on top of it. Adding the two would double-count.
+  uint64 total_skimmed_fee_msat = 12;
+
+  // Number of forwarded HTLCs that the next hop claimed from an on-chain transaction.
+  uint64 onchain_claims_count = 13;
+
+  // Average forwarding fee per payment, in millisatoshis, if known for every payment.
+  optional uint64 avg_fee_msat = 14;
+
+  // Average inbound amount per payment, in millisatoshis.
+  uint64 avg_inbound_amount_msat = 15;
+
+  // Timestamp of the first forward in this bucket, in seconds since the Unix epoch.
+  uint64 first_forwarded_at_timestamp = 16;
+
+  // Timestamp of the latest forward in this bucket, in seconds since the Unix epoch.
+  uint64 last_forwarded_at_timestamp = 17;
+
+  // Timestamp when this bucket was aggregated, in seconds since the Unix epoch.
+  uint64 aggregated_at_timestamp = 18;
+
+}
+
+// The forwarding history stored by LDK Node.
+enum ForwardedPaymentTrackingMode {
+  FORWARDED_PAYMENT_TRACKING_MODE_UNSPECIFIED = 0;
+  // Update per-channel totals without storing individual forwards.
+  FORWARDED_PAYMENT_TRACKING_MODE_STATS = 1;
+  // Also store individual forwards, which are later aggregated into channel-pair buckets.
+  FORWARDED_PAYMENT_TRACKING_MODE_DETAILED = 2;
+}
+
 // ChannelShutdownState mirrors LDK's `lightning::ln::channel_state::ChannelShutdownState`,
 // indicating how far along a channel is in the cooperative close process.
 enum ChannelShutdownState {
